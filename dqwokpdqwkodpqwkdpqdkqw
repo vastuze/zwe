@@ -1,11 +1,3 @@
--- Auto prestige: Lobby setup, upgrades, 2.5 farm/retry, 3.0 Rewards webhook, timed return.
--- Standalone: does not load or modify titan_pphud.luau.
--- Re-run in Lobby after a place teleport; automatic reinjection is not installed.
--- Step 1.5 spends Gold through the game's Upgrade All button; never spends Gems.
--- Flow: load -> Slot A/Lobby -> Claim All -> Upgrade All/read Grade
--- -> Shiganshina/Breach + 11 modifiers/Start -> farm/retry/skip/webhook
--- -> return at Gold target or 600 seconds -> re-execute in Lobby.
--- Gold is an absolute amount; P1 means the transition from P0 to P1.
 repeat task.wait(1) until game:IsLoaded()
 local configEnv = type(getgenv) == "function" and getgenv() or _G
 -- Configuration is supplied by loadstring.lua before this script runs.
