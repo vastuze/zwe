@@ -1,3 +1,11 @@
+-- Auto prestige: Lobby setup, upgrades, 2.5 farm/retry, 3.0 Rewards webhook, timed return.
+-- Standalone: does not load or modify titan_pphud.luau.
+-- Re-run in Lobby after a place teleport; automatic reinjection is not installed.
+-- Step 1.5 spends Gold through the game's Upgrade All button; never spends Gems.
+-- Flow: load -> Slot A/Lobby -> Claim All -> Upgrade All/read Grade
+-- -> Shiganshina/Breach + 11 modifiers/Start -> farm/retry/skip/webhook
+-- -> return at Gold target or 600 seconds -> re-execute in Lobby.
+-- Gold is an absolute amount; P1 means the transition from P0 to P1.
 repeat task.wait(1) until game:IsLoaded()
 local configEnv = type(getgenv) == "function" and getgenv() or _G
 -- Configuration is supplied by loadstring.lua before this script runs.
@@ -12,6 +20,10 @@ if configEnv.ClaimQuests == nil then
     configEnv.ClaimQuests = not game:GetService("UserInputService").TouchEnabled
 end
 assert(type(configEnv.ClaimQuests) == "boolean", "ClaimQuests must be true or false.")
+if configEnv.QuestVirtualInput == nil then
+    configEnv.QuestVirtualInput = game:GetService("UserInputService").TouchEnabled
+end
+assert(type(configEnv.QuestVirtualInput) == "boolean", "QuestVirtualInput must be true or false.")
 if configEnv.WebhookURL == nil then configEnv.WebhookURL = "" end
 if configEnv.Height == nil then configEnv.Height = 400 end
 if configEnv.Speed == nil then configEnv.Speed = 350 end
@@ -25,7 +37,7 @@ if configEnv.Modifiers == nil then
     configEnv.Modifiers = {"No Perks", "No Skills", "No Memories", "Nightmare", "Injury Prone",
         "Chronic Injuries", "Fog", "Glass Cannon", "Time Trial", "Fatigue", "Evolution"}
 end
-if configEnv.WebhookImageURL == nil then configEnv.WebhookImageURL = "" end
+if configEnv.WebhookImageURL == nil then configEnv.WebhookImageURL = "https://cdn.discordapp.com/attachments/983578378370170911/1568333579883384972/1781178911498_z7o8gg4.png?ex=6aef6ff7&is=6aee1e77&hm=b9eefe3c083a463fceeb9791566751d8c37e09668e1d65c9a9a39fa297d74765&" end
 assert(type(configEnv.UseGoldBoost) == "boolean",
     "UseGoldBoost must be true or false WITHOUT quotes; received " .. type(configEnv.UseGoldBoost))
 assert(type(configEnv.PrestigeSettings) == "table", "PrestigeSettings must be a table.")
@@ -362,13 +374,14 @@ local function awaitPath(root, names)
     return node
 end
 
-local function click(button, preferredEvent, stillNeeded)
+local function click(button, preferredEvent, stillNeeded, virtualOnly)
     assert(button:IsA("GuiButton"), "Not a UI button: " .. button:GetFullName())
     -- Instances can replicate before Effects.Hover installs their click callbacks.
     -- A preferred event keeps one-shot confirmations from firing both click signals.
     local events = preferredEvent and {preferredEvent} or {"MouseButton1Click", "Activated"}
     local deadline = os.clock() + 5
     repeat
+        if virtualOnly then break end
         if stillNeeded and not stillNeeded() then return end
         if type(getconnections) == "function" then
             for _, eventName in ipairs(events) do
@@ -403,6 +416,20 @@ local function click(button, preferredEvent, stillNeeded)
     assert(size.X > 0 and size.Y > 0, "Button has no clickable size: " .. button.Name)
     local input = game:GetService("VirtualInputManager")
     local x, y = position.X + size.X / 2, position.Y + size.Y / 2
+    if virtualOnly then
+        local camera = workspace.CurrentCamera
+        assert(camera and x >= 0 and y >= 0 and x < camera.ViewportSize.X and y < camera.ViewportSize.Y,
+            "Quest input target is outside the screen; stopping instead of clicking elsewhere.")
+        local ancestor = button.Parent
+        while ancestor do
+            if ancestor:IsA("GuiObject") and ancestor.ClipsDescendants then
+                local p, s = ancestor.AbsolutePosition, ancestor.AbsoluteSize
+                assert(x >= p.X and y >= p.Y and x < p.X + s.X and y < p.Y + s.Y,
+                    "Quest input target is clipped; scroll it into view before retrying.")
+            end
+            ancestor = ancestor.Parent
+        end
+    end
     print("[AUTO PRESTIGE] Using virtual click: " .. button:GetFullName())
     input:SendMouseMoveEvent(x, y, game)
     task.wait(0.05)
@@ -2102,6 +2129,9 @@ local function claimQuestNotifications(player)
         return
     end
     local interface = awaitPath(player, {"PlayerGui", "Interface"})
+    local function questClick(button)
+        click(button, "MouseButton1Click", nil, configEnv.QuestVirtualInput)
+    end
     local ui = awaitPath(interface, {"Quests"})
     local function waitUI(check, message)
         assert(waitForValue(check), message)
@@ -2113,7 +2143,7 @@ local function claimQuestNotifications(player)
         repeat
             button = findPath(interface, {"Topbar", "Main", "Categories", "Quests", "Interact"})
             local ready = button and button:IsA("GuiButton") and isVisible(button)
-            if ready and type(getconnections) == "function" then
+            if ready and not configEnv.QuestVirtualInput and type(getconnections) == "function" then
                 local ok, handlers = pcall(function() return getconnections(button.MouseButton1Click) end)
                 -- Some executors cannot expose handlers; allow the input fallback after a bounded wait.
                 if ok and type(handlers) == "table" then
@@ -2133,7 +2163,7 @@ local function claimQuestNotifications(player)
             button = findPath(interface, {"Topbar", "Main", "Categories", "Quests", "Interact"})
             assert(button and isVisible(button), "Quests entry is unavailable after initialization wait.")
             print("[AUTO PRESTIGE] Opening Quests, attempt " .. attempt .. "/3")
-            click(button, "MouseButton1Click")
+            questClick(button)
             local openedDeadline = os.clock() + 5
             repeat
                 if isVisible(ui) then break end
@@ -2154,7 +2184,7 @@ local function claimQuestNotifications(player)
         if row and isVisible(row) and badge and isVisible(badge)
             and (not (badge:IsA("ImageLabel") or badge:IsA("ImageButton")) or badge.ImageTransparency < 0.99) then
             task.wait(0.3)
-            click(awaitPath(row, {"Inner", "Interact"}), "MouseButton1Click")
+            questClick(awaitPath(row, {"Inner", "Interact"}))
             waitUI(function()
                 local title = findPath(details, {"Title", "Title"})
                 return title and title.Text:upper() == tab[1]:gsub("_", " "):upper() .. " QUESTS"
@@ -2178,7 +2208,7 @@ local function claimQuestNotifications(player)
                 if not button then break end
                 attempted[tag] = true
                 task.wait(0.3)
-                click(button, "MouseButton1Click")
+                questClick(button)
                 waitUI(function()
                     return button.Parent and button:GetAttribute("Tag") == nil and claimed and isVisible(claimed)
                 end, "Quest claim not confirmed; no retry: " .. tag)
