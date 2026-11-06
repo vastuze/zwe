@@ -7,6 +7,11 @@ if configEnv.UseGoldBoost == nil then
     warn("[AUTO PRESTIGE] Loader config missing: Gold Potion purchases disabled. Run loadstring.lua to apply your settings.")
 end
 if configEnv.GoldPotionHours == nil then configEnv.GoldPotionHours = 2 end
+-- Temporary mobile isolation: do not open Quests automatically on touch devices.
+if configEnv.ClaimQuests == nil then
+    configEnv.ClaimQuests = not game:GetService("UserInputService").TouchEnabled
+end
+assert(type(configEnv.ClaimQuests) == "boolean", "ClaimQuests must be true or false.")
 if configEnv.WebhookURL == nil then configEnv.WebhookURL = "" end
 if configEnv.Height == nil then configEnv.Height = 400 end
 if configEnv.Speed == nil then configEnv.Speed = 350 end
@@ -528,7 +533,12 @@ local function readDifficulty(player)
     local equipmentButton = awaitPath(interface, {"Topbar", "Main", "Categories", "Equipment", "Interact"})
     -- IsLoaded only covers Roblox loading, not the game's delayed UI setup.
     print("[AUTO PRESTIGE] Waiting for Lobby Equipment UI initialization...")
+    local handlerDeadline = os.clock() + 10
     while not isVisible(equipment) and type(getconnections) == "function" do
+        if os.clock() >= handlerDeadline then
+            warn("[AUTO PRESTIGE] Equipment handlers unavailable after 10 seconds; trying normal click fallback.")
+            break
+        end
         local ready = false
         for _, signal in ipairs({"MouseButton1Click", "Activated"}) do
             local ok, handlers = pcall(function() return getconnections(equipmentButton[signal]) end)
@@ -2087,6 +2097,10 @@ local function ensureLobby2D(player)
 end
 
 local function claimQuestNotifications(player)
+    if not configEnv.ClaimQuests then
+        print("[AUTO PRESTIGE] Quests disabled by ClaimQuests; continuing without opening Quests.")
+        return
+    end
     local interface = awaitPath(player, {"PlayerGui", "Interface"})
     local ui = awaitPath(interface, {"Quests"})
     local function waitUI(check, message)
