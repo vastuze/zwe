@@ -24,7 +24,7 @@ if configEnv.QuestVirtualInput == nil then
     configEnv.QuestVirtualInput = game:GetService("UserInputService").TouchEnabled
 end
 assert(type(configEnv.QuestVirtualInput) == "boolean", "QuestVirtualInput must be true or false.")
-if configEnv.WebhookURL == nil then configEnv.WebhookURL = "" end
+if configEnv.WebhookURL == nil then configEnv.WebhookURL = " https://discord.com/api/webhooks/996043763858288700/z3Nh4ETcF5ZMeX3_C2CSs8R5ERoC4LJRHDoVjY773LNyHJfcLF2-0jZFEn8J17_62GKC" end
 if configEnv.Height == nil then configEnv.Height = 400 end
 if configEnv.Speed == nil then configEnv.Speed = 350 end
 if configEnv.PrestigeSettings == nil then
