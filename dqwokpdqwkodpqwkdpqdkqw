@@ -426,11 +426,23 @@ local function click(button, preferredEvent, stillNeeded, virtualOnly)
     input:SendMouseMoveEvent(x, y, game)
     task.wait(0.05)
     if stillNeeded and not stillNeeded() then return end
+    local pressed = false
     local ok, message = pcall(function()
         input:SendMouseButtonEvent(x, y, 0, true, game, 0)
+        pressed = true
         task.wait(0.1)
+        input:SendMouseButtonEvent(x, y, 0, false, game, 0)
+        pressed = false
     end)
-    input:SendMouseButtonEvent(x, y, 0, false, game, 0)
+    if pressed then
+        pcall(function()
+            input:SendMouseButtonEvent(x, y, 0, false, game, 0)
+        end)
+    end
+    -- Always emit a final mouse-up so a failed virtual click cannot leave it held.
+    pcall(function()
+        input:SendMouseButtonEvent(x, y, 0, false, game, 0)
+    end)
     if not ok then error(message) end
 end
 
