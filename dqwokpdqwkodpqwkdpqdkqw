@@ -142,7 +142,13 @@ local function goldBoostExpired(timer, player)
         timer.goldBoostZeroSince = nil
         return false
     end
-    -- Starting a mission without a potion (e.g. insufficient Gems) must not cause a return loop.
+    -- A potion can expire during the Lobby -> mission transition, so a positive
+    -- value may never be observed in this server. A confirmed Lobby purchase or
+    -- activation is proof a potion was used; without it, returning would loop.
+    if not timer.goldBoostSeen then
+        local env = type(getgenv) == "function" and getgenv() or _G
+        if env.AutoPrestigeGoldPotionUsed then timer.goldBoostSeen = true end
+    end
     if not timer.goldBoostSeen then return false end
     timer.goldBoostZeroSince = timer.goldBoostZeroSince or os.clock()
     return os.clock() - timer.goldBoostZeroSince >= 1
@@ -2019,6 +2025,16 @@ local function startMissionFarm()
             local station, post = getRefillPart(), remote("POST")
             if station and post and post:IsA("RemoteEvent") and valid() then
                 local oldCF = root.CFrame
+                local restored = false
+                local function restore()
+                    if restored or not valid() then return end
+                    restored = true
+                    root.CFrame = CFrame.new(oldCF.Position.X, math.max(configEnv.Height, oldCF.Position.Y), oldCF.Position.Z)
+                        * oldCF.Rotation
+                    root.Anchored = true
+                    root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                    root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+                end
                 print("[AUTO PRESTIGE] Blades empty: teleporting to " .. station:GetFullName())
                 local ok, err = pcall(function()
                     clearRefillHold()
@@ -2026,35 +2042,36 @@ local function startMissionFarm()
                     root.CFrame = station.CFrame + Vector3.new(0, 3, 0)
                     root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
                     root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-                    -- Allow arrival replication, but return immediately if reserves are already full.
+                    -- Give the station one second to register the presence; leave early if full.
                     local arrivalDeadline = os.clock() + 1
                     repeat
                         if not valid() then return end
-                        if bladeStatus(character) == 3 then return end
+                        local atStation = bladeStatus(character)
+                        if atStation == nil or atStation > 0 then break end
                         task.wait(0.05)
                     until os.clock() >= arrivalDeadline
                     if not valid() then return end
-                    if bladeStatus(character) == 3 then return end
-                    post:FireServer("Attacks", "Reload", station)
-                    -- Only wait for reserve sets (3/3), not equipped segment replication.
+                    local beforeSets = bladeStatus(character)
+                    if beforeSets == nil then error("Blade state unreadable at refill station.") end
+                    if beforeSets == 0 then
+                        post:FireServer("Attacks", "Reload", station)
+                        -- Reload is applied server-side on call. Leave the station at once so a
+                        -- titan cannot hit the character, and confirm the refill from safety.
+                        restore()
+                    end
                     local deadline = os.clock() + 10
                     repeat
                         if not valid() then return end
                         local sets = bladeStatus(character)
-                        if sets == 3 then return end
+                        if sets and sets > 0 then
+                            print("[AUTO PRESTIGE] Refill confirmed: " .. sets .. " reserve set(s); farm resumes.")
+                            return
+                        end
                         task.wait(0.05)
                     until os.clock() >= deadline
-                    error("Reload did not confirm 3/3 blade sets within 10 seconds.")
+                    warn("[AUTO PRESTIGE] Refill not confirmed within 10 seconds; next cycle will retry.")
                 end)
-                if valid() then
-                    root.CFrame = CFrame.new(oldCF.Position.X, math.max(configEnv.Height, oldCF.Position.Y), oldCF.Position.Z)
-                        * oldCF.Rotation
-                    root.Anchored = true
-                    root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-                    root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-                    if ok then print("[AUTO PRESTIGE] Blades 3/3: returned above previous position at configured height; resuming farm.") end
-                    -- No fixed cooldown after 3/3; the next iteration may resume farming.
-                end
+                restore()
                 if not ok then warn("[AUTO PRESTIGE] Refill failed: " .. tostring(err)) end
             else
                 refillWarning(not station and "HQ refill part not found."
@@ -2318,6 +2335,10 @@ local function ensureGoldPotion(player)
     assert(initial, "Gold Potion timer unavailable; purchases skipped.")
     print("[POTION] Remaining=" .. initial .. "s | Target=" .. targetSeconds .. "s")
     if initial >= targetSeconds - 10 then
+        -- An active potion must also mark "used" so the next mission can return
+        -- to Lobby when its timer reaches zero.
+        local activeEnv = type(getgenv) == "function" and getgenv() or _G
+        activeEnv.AutoPrestigeGoldPotionUsed = true
         print("[AUTO PRESTIGE] Gold Potion target already met. Remaining seconds: " .. initial)
         return
     end
@@ -2408,6 +2429,10 @@ local function ensureGoldPotion(player)
             local after = timer()
             return after and after - before >= product.seconds - 60
         end), "Potion use not confirmed; no further purchase or use.")
+        -- Persist proof that a Gold potion was activated so the next mission can
+        -- return to Lobby when the timer reaches zero, even if it expired on join.
+        local boostEnv = type(getgenv) == "function" and getgenv() or _G
+        boostEnv.AutoPrestigeGoldPotionUsed = true
         print("[AUTO PRESTIGE] Potion confirmed; Pumpkins: " .. balance .. " | Timer: " .. tostring(timer()))
         local seconds = math.floor(timer())
         sendLobbyResult("GOLD POTION USED", {
