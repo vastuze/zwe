@@ -1,11 +1,3 @@
--- Auto prestige: Lobby setup, upgrades, 2.5 farm/retry, 3.0 Rewards webhook, timed return.
--- Standalone: does not load or modify titan_pphud.luau.
--- Re-run in Lobby after a place teleport; automatic reinjection is not installed.
--- Step 1.5 spends Gold through the game's Upgrade All button; never spends Gems.
--- Flow: load -> Slot A/Lobby -> Claim All -> Upgrade All/read Grade
--- -> Shiganshina/Breach + 11 modifiers/Start -> farm/retry/skip/webhook
--- -> return at Gold target or 600 seconds -> re-execute in Lobby.
--- Gold is an absolute amount; P1 means the transition from P0 to P1.
 repeat task.wait(1) until game:IsLoaded()
 local configEnv = type(getgenv) == "function" and getgenv() or _G
 -- Configuration is supplied by loadstring.lua before this script runs.
@@ -24,7 +16,7 @@ if configEnv.QuestVirtualInput == nil then
     configEnv.QuestVirtualInput = game:GetService("UserInputService").TouchEnabled
 end
 assert(type(configEnv.QuestVirtualInput) == "boolean", "QuestVirtualInput must be true or false.")
-if configEnv.WebhookURL == nil then configEnv.WebhookURL = " https://discord.com/api/webhooks/996043763858288700/z3Nh4ETcF5ZMeX3_C2CSs8R5ERoC4LJRHDoVjY773LNyHJfcLF2-0jZFEn8J17_62GKC" end
+if configEnv.WebhookURL == nil then configEnv.WebhookURL = "" end
 if configEnv.Height == nil then configEnv.Height = 400 end
 if configEnv.Speed == nil then configEnv.Speed = 350 end
 if configEnv.PrestigeSettings == nil then
@@ -1677,13 +1669,76 @@ local function startMissionFarm()
     assert(player, "LocalPlayer did not load for Auto Farm.")
     local input = game:GetService("VirtualInputManager")
     local tweenService = game:GetService("TweenService")
+    local runService = game:GetService("RunService")
     local farm = {running = true, connections = {}}
     env.AutoPrestigeFarm = farm
+
+    -- Camera lock belongs to this farm run; a rerun releases the previous lock.
+    if farm.cameraRelease then farm.cameraRelease() end
+    local cameraLock
+    local function releaseCamera()
+        if not cameraLock then return end
+        local lock = cameraLock
+        cameraLock = nil
+        farm.cameraRelease = nil
+        if lock.connection then lock.connection:Disconnect() end
+        local camera = workspace.CurrentCamera
+        if camera and lock.character and lock.character.Parent then
+            camera.CameraType = Enum.CameraType.Custom
+            camera.CameraSubject = lock.character:FindFirstChildOfClass("Humanoid") or lock.character
+        end
+    end
+    farm.cameraRelease = releaseCamera
+    local function lockCamera()
+        local camera = workspace.CurrentCamera
+        if not camera then return end
+        releaseCamera()
+        cameraLock = {character = player.Character, cframe = camera.CFrame}
+        camera.CameraType = Enum.CameraType.Scriptable
+        camera.CFrame = cameraLock.cframe
+        cameraLock.connection = runService.RenderStepped:Connect(function()
+            local current = workspace.CurrentCamera
+            if current and cameraLock then
+                current.CameraType = Enum.CameraType.Scriptable
+                current.CFrame = cameraLock.cframe
+            end
+        end)
+    end
     local function active()
         local timer = env.AutoPrestigeLobbyTimer
         return farm.running and env.AutoPrestigeFarm == farm and inMission()
             and not (timer and (timer.leaving or os.clock() >= timer.deadline))
             and not (timer and goldBoostExpired(timer, player))
+    end
+
+    -- test.lua: while the root is unanchored, cancel downward motion immediately.
+    local heightGuard
+    local function stopHeightGuard()
+        if heightGuard then heightGuard = nil end
+    end
+    local function holdHeight(character, root, minimumY)
+        if heightGuard then heightGuard.enabled = false end
+        local state = {character = character, root = root, minimumY = minimumY}
+        heightGuard = state
+        local humanoid = character:FindFirstChildOfClass("Humanoid")
+        task.spawn(function()
+            while active() and heightGuard == state do
+                if not root.Parent or player.Character ~= character
+                    or not humanoid or humanoid.Health <= 0 then break end
+                if root.Anchored then
+                    if root.AssemblyLinearVelocity.Y > 0 then
+                        root.AssemblyLinearVelocity = Vector3.zero
+                    end
+                    break
+                end
+                local velocity = root.AssemblyLinearVelocity
+                if root.Position.Y < state.minimumY or velocity.Y < -1 then
+                    root.AssemblyLinearVelocity = Vector3.new(velocity.X, configEnv.Speed, velocity.Z)
+                end
+                task.wait()
+            end
+            if heightGuard == state then heightGuard = nil end
+        end)
     end
     local function clearRefillHold()
         if farm.refillHold then farm.refillHold:Destroy(); farm.refillHold = nil end
@@ -1694,6 +1749,8 @@ local function startMissionFarm()
         root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
     end
     local function release()
+        stopHeightGuard()
+        releaseCamera()
         clearRefillHold()
         if farm.tween then farm.tween:Cancel(); farm.tween = nil end
         local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
@@ -2030,6 +2087,7 @@ local function startMissionFarm()
         if not valid() or not nape.Parent then return end
         root.Anchored = false
         local height = math.max(configEnv.Height, nape.Position.Y + 50)
+        holdHeight(character, root, height)
         local destination = CFrame.new(nape.Position.X, height, nape.Position.Z) * CFrame.new(0, 0, 2)
         local duration = math.max(0.05, (root.Position - destination.Position).Magnitude / configEnv.Speed)
         local tween = tweenService:Create(root, TweenInfo.new(duration, Enum.EasingStyle.Linear), {CFrame = destination})
@@ -2056,6 +2114,9 @@ local function startMissionFarm()
         if not valid() or not nape.Parent then release(); return end
         if playbackState ~= Enum.PlaybackState.Completed then return end
         root.Anchored = true
+        stopHeightGuard()
+        root.AssemblyLinearVelocity = Vector3.zero
+        lockCamera()
         local post = remote("POST")
         if post then
             pcall(function()
@@ -2250,19 +2311,36 @@ local function ensureGoldPotion(player)
     end
     local shop = require(ReplicatedStorage.Modules.Storage.Shop)
     local products = {
-        {index = 9, tag = "2x Gold Boost [2h]", cost = 13999, seconds = 7200},
-        {index = 8, tag = "2x Gold Boost [1h]", cost = 7999, seconds = 3600},
-        {index = 7, tag = "2x Gold Boost [30m]", cost = 4499, seconds = 1800},
+        {index = 9, tag = "2x Gold Boost [2h]", cost = 2799, seconds = 7200},
+        {index = 8, tag = "2x Gold Boost [1h]", cost = 1599, seconds = 3600},
+        {index = 7, tag = "2x Gold Boost [30m]", cost = 999, seconds = 1800},
     }
     for _, product in ipairs(products) do
-        local entry = shop["1_Boosts"] and shop["1_Boosts"][product.index]
-        assert(entry and entry.Tag == product.tag and entry.Currency == "Gems" and entry.Cost == product.cost,
+        local entry = shop["2_Boosts"] and shop["2_Boosts"][product.index]
+        assert(entry and entry.Tag == product.tag and entry.Currency == "Pumpkins" and entry.Cost == product.cost,
             "Gold Potion product/price changed; purchases skipped.")
     end
-    -- Switch back through the game's handler so the live cache refreshes the Topbar.
-    openEquipment(interface)
-    task.wait(1.5)
-    local label = awaitPath(interface, {"Topbar", "Main", "Currencies", "Gems", "Amount"})
+    -- Market.Update binds Held to Pumpkins only when the Event category is selected.
+    local market = awaitPath(interface, {"Market"})
+    if not isVisible(market) then
+        click(awaitPath(interface, {"Topbar", "Main", "Categories", "Market", "Interact"}))
+        assert(waitForValue(function() return isVisible(market) end), "Market did not open; no purchase sent.")
+    end
+    task.wait(1)
+    local eventBoosts = awaitPath(market, {"Main", "Items", "2_Boosts"})
+    for _ = 1, 4 do
+        if eventBoosts.Visible then break end
+        click(awaitPath(market, {"Main", "Currency_Swap"}), "MouseButton1Click")
+        task.wait(1)
+    end
+    assert(eventBoosts.Visible and isVisible(market), "Event Shop unavailable; never falling back to Gems.")
+    local held = awaitPath(market, {"Main", "Held"})
+    local items = require(ReplicatedStorage.Modules.Storage.Items)
+    local currencyIcon = held:FindFirstChild("Currency")
+    local pumpkin = items.Pumpkins
+    assert(pumpkin and currencyIcon and tostring(currencyIcon.Image):match("(%d+)$")
+        == tostring(pumpkin.Image):match("(%d+)$"), "Market currency is not confirmed as Pumpkins.")
+    local label = awaitPath(held, {"Amount"})
     local balance, lastBalance, stableSince
     local balanceDeadline = os.clock() + 20
     repeat
@@ -2277,8 +2355,8 @@ local function ensureGoldPotion(player)
         if stableSince and os.clock() - stableSince >= (balance == 0 and 5 or 2) then break end
         task.wait(0.2)
     until os.clock() >= balanceDeadline
-    assert(balance and balance >= 0 and balance < math.huge, "Exact Gems unavailable; purchases skipped.")
-    print("[POTION] Gems available: " .. balance)
+    assert(balance and balance >= 0 and balance < math.huge, "Exact Pumpkins unavailable; purchases skipped.")
+    print("[POTION] Pumpkins available: " .. balance)
     local remote = awaitPath(ReplicatedStorage, {"Assets", "Remotes", "GET"})
     -- Recheck after claiming/UI transitions in case a potion was activated meanwhile.
     local current = timer()
@@ -2286,7 +2364,7 @@ local function ensureGoldPotion(player)
     -- Ignore ten seconds of countdown drift; never buy another whole potion for that alone.
     if current >= targetSeconds - 10 then return end
     local remainingSeconds = math.ceil((targetSeconds - current - 10) / 1800) * 1800
-    local limit = math.min(math.floor(balance / 4499), math.ceil(remainingSeconds / 1800))
+    local limit = math.min(math.floor(balance / 999), math.ceil(remainingSeconds / 1800))
     for _ = 1, limit do
         local live = timer()
         assert(live, "Potion timer lost; stopping purchases.")
@@ -2296,11 +2374,11 @@ local function ensureGoldPotion(player)
         local product = chooseGoldPotion(balance, products, remainingSeconds)
         if not product then break end
         assert(timer(), "Potion timer lost; stopping purchases.")
-        print("[AUTO PRESTIGE] Buying " .. product.tag .. " for " .. product.cost .. " Gems.")
-        local data = remote:InvokeServer("S_Market", "Buy", "1_Boosts", product.index, 1)
+        print("[AUTO PRESTIGE] Buying " .. product.tag .. " for " .. product.cost .. " Pumpkins.")
+        local data = remote:InvokeServer("S_Market", "Buy", "2_Boosts", product.index, 1)
         assert(type(data) == "table", "Potion purchase refused/unconfirmed; no retry.")
         local slot = data.Slots and data.Slots[data.Current_Slot]
-        local remaining = slot and slot.Currency and slot.Currency.Gems
+        local remaining = slot and slot.Currency and slot.Currency.Pumpkins
         assert(type(remaining) == "number" and remaining >= 0 and remaining < balance,
             "Purchase balance not confirmed; stopping without retry.")
         balance = remaining
@@ -2313,11 +2391,11 @@ local function ensureGoldPotion(player)
             local after = timer()
             return after and after - before >= product.seconds - 60
         end), "Potion use not confirmed; no further purchase or use.")
-        print("[AUTO PRESTIGE] Potion confirmed; Gems: " .. balance .. " | Timer: " .. tostring(timer()))
+        print("[AUTO PRESTIGE] Potion confirmed; Pumpkins: " .. balance .. " | Timer: " .. tostring(timer()))
         local seconds = math.floor(timer())
         sendLobbyResult("GOLD POTION USED", {
             {name = "Potion", value = product.tag, inline = true},
-            {name = "Gems remaining", value = tostring(balance), inline = true},
+            {name = "Pumpkins remaining", value = tostring(balance), inline = true},
             {name = "Gold Boost Remaining Time", value = string.format("%02d:%02d:%02d",
                 math.floor(seconds / 3600), math.floor(seconds / 60) % 60, seconds % 60), inline = true},
         })
@@ -2325,10 +2403,10 @@ local function ensureGoldPotion(player)
     end
     local final = timer()
     if final and final >= targetSeconds - 10 then
-        print("[POTION] Target reached: " .. final .. "s | Gems: " .. balance)
+        print("[POTION] Target reached: " .. final .. "s | Pumpkins: " .. balance)
     else
         warn("[POTION] Target NOT reached: remaining=" .. tostring(final) .. "s / " .. targetSeconds
-            .. "s | Gems=" .. balance .. "; continuing farm without claiming success.")
+            .. "s | Pumpkins=" .. balance .. "; continuing farm without claiming success.")
     end
 end
 
