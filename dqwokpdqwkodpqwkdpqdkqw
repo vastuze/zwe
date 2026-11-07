@@ -2334,15 +2334,20 @@ local function ensureGoldPotion(player)
     end
     -- Market.Update binds Held to Pumpkins only when the Event category is selected.
     local market = awaitPath(interface, {"Market"})
+    local touchInput = game:GetService("UserInputService").TouchEnabled
+    local function marketClick(button, preferredEvent)
+        -- Phone UI needs the existing press/release path; PC keeps signal dispatch.
+        click(button, preferredEvent, nil, touchInput)
+    end
     if not isVisible(market) then
-        click(awaitPath(interface, {"Topbar", "Main", "Categories", "Market", "Interact"}))
+        marketClick(awaitPath(interface, {"Topbar", "Main", "Categories", "Market", "Interact"}))
         assert(waitForValue(function() return isVisible(market) end), "Market did not open; no purchase sent.")
     end
     task.wait(1)
     local eventBoosts = awaitPath(market, {"Main", "Items", "2_Boosts"})
     for _ = 1, 4 do
         if eventBoosts.Visible then break end
-        click(awaitPath(market, {"Main", "Currency_Swap"}), "MouseButton1Click")
+        marketClick(awaitPath(market, {"Main", "Currency_Swap"}), "MouseButton1Click")
         task.wait(1)
     end
     assert(eventBoosts.Visible and isVisible(market), "Event Shop unavailable; never falling back to Gems.")
