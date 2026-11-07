@@ -1508,7 +1508,7 @@ local function makeFields(interface, main, rows, goldSummary)
             fields[#fields + 1] = {name = stat:gsub("_", " "), value = amount.Text, inline = true}
         end
     end
-    fields[#fields + 1] = {name = "Gold Boost Remaining Time", value = goldPotionText(), inline = true}
+    fields[#fields + 1] = {name = "Remaining Time", value = goldPotionText(), inline = true}
     fields[#fields + 1] = {name = "Prestige: " .. prestigeText(), value = "\226\128\139", inline = true}
     fields[#fields + 1] = {name = "Các boost", value = boostsText(), inline = false}
     local parts, length = {}, 0
@@ -2396,7 +2396,7 @@ local function ensureGoldPotion(player)
         sendLobbyResult("GOLD POTION USED", {
             {name = "Potion", value = product.tag, inline = true},
             {name = "Pumpkins remaining", value = tostring(balance), inline = true},
-            {name = "Gold Boost Remaining Time", value = string.format("%02d:%02d:%02d",
+            {name = "Remaining Time", value = string.format("%02d:%02d:%02d",
                 math.floor(seconds / 3600), math.floor(seconds / 60) % 60, seconds % 60), inline = true},
         })
         task.wait(0.3)
