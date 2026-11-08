@@ -2431,6 +2431,13 @@ local function ensureGoldPotion(player)
     assert(current, "Gold Potion timer unavailable after claims.")
     -- Ignore ten seconds of countdown drift; never buy another whole potion for that alone.
     if current >= targetSeconds - 10 then return end
+    if balance < 999 then
+        -- Not enough for even the cheapest potion: farm now, restock on a later Lobby cycle.
+        local shortageEnv = type(getgenv) == "function" and getgenv() or _G
+        shortageEnv.AutoPrestigePotionShort = true
+        print("[POTION] Not enough Pumpkins (" .. balance .. " < 999); farming without restock.")
+        return
+    end
     local remainingSeconds = math.ceil((targetSeconds - current - 10) / 1800) * 1800
     local limit = math.min(math.floor(balance / 999), math.ceil(remainingSeconds / 1800))
     for _ = 1, limit do
@@ -2551,8 +2558,14 @@ local function runPrestigeFlow()
         if type(remaining) == "number" and remaining > 0 then
             print("[AUTO PRESTIGE] Gold Boost active: " .. math.floor(remaining) .. "s; entering mission.")
         elseif type(remaining) == "number" then
-            warn("[AUTO PRESTIGE] Gold Boost timer is zero; mission not started.")
-            return
+            if configEnv.AutoPrestigePotionShort
+                or (type(getgenv) == "function" and getgenv().AutoPrestigePotionShort) then
+                warn("[AUTO PRESTIGE] Gold Boost unavailable (Pumpkins shortage); farming without it.")
+                if type(getgenv) == "function" then getgenv().AutoPrestigePotionShort = nil end
+            else
+                warn("[AUTO PRESTIGE] Gold Boost timer is zero; mission not started.")
+                return
+            end
         else
             -- Mobile replication can lag behind the Lobby purchase. A missing timer is
             -- unknown, not proof of expiry; blocking here stalls the whole flow.
