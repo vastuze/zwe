@@ -130,8 +130,15 @@ local function goldBoostExpired(timer, player)
     local gold = boosts and boosts:FindFirstChild("Gold")
     if not gold or not (gold:IsA("NumberValue") or gold:IsA("IntValue")) then
         timer.goldBoostZeroSince = nil
+        if timer.goldBoostSeen then
+            -- The timer existed and then vanished: treat as expiry instead of
+            -- waiting for a value that will not replicate again.
+            timer.goldBoostMissingSince = timer.goldBoostMissingSince or os.clock()
+            return os.clock() - timer.goldBoostMissingSince >= 5
+        end
         return false
     end
+    timer.goldBoostMissingSince = nil
     local seconds = gold.Value
     if type(seconds) ~= "number" or seconds ~= seconds or seconds < 0 or seconds == math.huge then
         timer.goldBoostZeroSince = nil
@@ -2543,10 +2550,14 @@ local function runPrestigeFlow()
             and boostNow.Value or nil
         if type(remaining) == "number" and remaining > 0 then
             print("[AUTO PRESTIGE] Gold Boost active: " .. math.floor(remaining) .. "s; entering mission.")
-        else
-            warn("[AUTO PRESTIGE] No active Gold Boost after Lobby setup (remaining="
-                .. tostring(remaining) .. "); mission not started.")
+        elseif type(remaining) == "number" then
+            warn("[AUTO PRESTIGE] Gold Boost timer is zero; mission not started.")
             return
+        else
+            -- Mobile replication can lag behind the Lobby purchase. A missing timer is
+            -- unknown, not proof of expiry; blocking here stalls the whole flow.
+            warn("[AUTO PRESTIGE] Gold Boost timer unreadable before mission; continuing on the "
+                .. "Lobby purchase confirmation.")
         end
     end
     tryPrestige(player)
