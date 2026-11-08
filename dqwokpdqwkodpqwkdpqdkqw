@@ -429,6 +429,29 @@ local function click(button, preferredEvent, stillNeeded, virtualOnly)
         end
     end
     print("[AUTO PRESTIGE] Using virtual click: " .. button:GetFullName())
+    -- Mobile UIs often ignore emulated mouse input; prefer a real tap when the
+    -- executor supports it, and fall back to SendTouch before mouse.
+    if game:GetService("UserInputService").TouchEnabled then
+        local global = getfenv and getfenv(0) or {}
+        local tap = global.tap
+        local virtualTap = global.virtualtap or global.virtualTouch
+        local function touched()
+            if type(tap) == "function" then tap(x, y); return true end
+            if type(virtualTap) == "function" then virtualTap(x, y); return true end
+            if type(input.SendTouch) == "function" then
+                input:SendTouch(x, y, 0)
+                task.wait(0.1)
+                input:SendTouch(x, y, 2)
+                return true
+            end
+            return false
+        end
+        if touched() then
+            task.wait(0.15)
+            return
+        end
+        print("[AUTO PRESTIGE] No touch API available; using emulated mouse.")
+    end
     input:SendMouseMoveEvent(x, y, game)
     task.wait(0.05)
     if stillNeeded and not stillNeeded() then return end
@@ -2512,6 +2535,20 @@ local function runPrestigeFlow()
     -- Prestige is checked before Upgrade All can spend the threshold balance.
     local boosted, boostError = pcall(ensureGoldPotion, player)
     if not boosted then warn("[AUTO PRESTIGE] Gold Potion skipped: " .. tostring(boostError)) end
+    -- Do not enter a mission without an active Gold boost: farming without it wastes a cycle,
+    -- and a missing replicated timer inside the mission would never trigger the Lobby return.
+    if configEnv.UseGoldBoost and configEnv.GoldPotionHours and configEnv.GoldPotionHours > 0 then
+        local boostNow = findPath(player, {"Boosts", "Gold"})
+        local remaining = boostNow and (boostNow:IsA("NumberValue") or boostNow:IsA("IntValue"))
+            and boostNow.Value or nil
+        if type(remaining) == "number" and remaining > 0 then
+            print("[AUTO PRESTIGE] Gold Boost active: " .. math.floor(remaining) .. "s; entering mission.")
+        else
+            warn("[AUTO PRESTIGE] No active Gold Boost after Lobby setup (remaining="
+                .. tostring(remaining) .. "); mission not started.")
+            return
+        end
+    end
     tryPrestige(player)
     local difficulty = readDifficulty(player)
     print("[AUTO PRESTIGE] Mission: Shiganshina/Breach -> configured modifiers -> Start.")
