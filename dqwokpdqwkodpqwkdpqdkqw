@@ -2592,7 +2592,7 @@ local function waitLobbyAutoexec(player)
             stableSince = nil
         end
         previousUI = ui
-        if stableSince and os.clock() - stableSince >= 3 and os.clock() - started >= 15 then
+        if stableSince and os.clock() - stableSince >= 3 and os.clock() - started >= 5 then
             print("[AUTO PRESTIGE] Lobby UI loaded; starting menu setup.")
             return
         end
