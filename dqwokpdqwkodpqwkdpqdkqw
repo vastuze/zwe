@@ -169,7 +169,7 @@ local function startLobbyTimer()
         print("[AUTO PRESTIGE] 10-minute Lobby timer already active.")
         return
     end
-    local timer = {jobId = game.JobId, placeId = game.PlaceId, deadline = os.clock() + 600}
+    local timer = {jobId = game.JobId, placeId = game.PlaceId, deadline = os.clock() + 200}
     env.AutoPrestigeLobbyTimer = timer
     local player = Players.LocalPlayer
     goldBoostExpired(timer, player)
@@ -2338,6 +2338,47 @@ local function claimQuestNotifications(player)
     end
 end
 
+local function closePanel(player, panelName)
+    local interface = findPath(player, {"PlayerGui", "Interface"})
+    local panel = interface and interface:FindFirstChild(panelName)
+    if not panel or not isVisible(panel) then return end
+    local function closed()
+        local deadline = os.clock() + 5
+        repeat
+            if not isVisible(panel) then return true end
+            task.wait(0.1)
+        until os.clock() >= deadline
+        return false
+    end
+    local function closeButton(parent)
+        for _, candidate in ipairs(parent and parent:GetDescendants() or {}) do
+            if candidate:IsA("GuiButton") and isVisible(candidate) and candidate.Name:match("Close$") then
+                return candidate
+            end
+        end
+    end
+    for _, parent in ipairs({panel:FindFirstChild("Top"), panel}) do
+        local button = closeButton(parent)
+        if button then
+            if pcall(click, button, "MouseButton1Click") and closed() then return end
+            break
+        end
+    end
+    -- The category button toggles the open panel; only used after a named close failed.
+    local entry = findPath(interface, {"Topbar", "Main", "Categories", panelName, "Interact"})
+    if entry and entry:IsA("GuiButton") and isVisible(entry) then
+        pcall(click, entry, "MouseButton1Click")
+        if closed() then return end
+    end
+    warn("[POTION] " .. panelName .. " panel could not be closed.")
+end
+
+-- A new account without Pumpkins cannot buy a Gold Boost in Lobby. Farming is the
+-- only way to earn them, so the potion step must never block the mission start.
+local function potionUnavailable(reason)
+    print("[POTION] " .. reason .. "; farming without a Gold Boost.")
+end
+
 local function chooseGoldPotion(balance, products, remainingSeconds)
     if remainingSeconds <= 0 then return nil end
     for _, product in ipairs(products) do
@@ -2347,7 +2388,7 @@ local function chooseGoldPotion(balance, products, remainingSeconds)
     if smallest and remainingSeconds < smallest.seconds and balance >= smallest.cost then return smallest end
 end
 
-local function ensureGoldPotion(player)
+local function purchaseGoldPotion(player)
     print("[POTION] Effective config: UseGoldBoost=" .. tostring(configEnv.UseGoldBoost)
         .. " | GoldPotionHours=" .. tostring(configEnv.GoldPotionHours))
     if not configEnv.UseGoldBoost or configEnv.GoldPotionHours == 0 then
@@ -2362,7 +2403,10 @@ local function ensureGoldPotion(player)
             and value.Value >= 0 and value.Value < math.huge then return value.Value end
     end
     local initial = timer()
-    assert(initial, "Gold Potion timer unavailable; purchases skipped.")
+    if not initial then
+        potionUnavailable("Gold Potion timer unavailable")
+        return
+    end
     print("[POTION] Remaining=" .. initial .. "s | Target=" .. targetSeconds .. "s")
     if initial >= targetSeconds - 10 then
         -- An active potion must also mark "used" so the next mission can return
@@ -2370,7 +2414,7 @@ local function ensureGoldPotion(player)
         local activeEnv = type(getgenv) == "function" and getgenv() or _G
         activeEnv.AutoPrestigeGoldPotionUsed = true
         print("[AUTO PRESTIGE] Gold Potion target already met. Remaining seconds: " .. initial)
-        return
+        return true
     end
     local shop = require(ReplicatedStorage.Modules.Storage.Shop)
     local products = {
@@ -2380,8 +2424,11 @@ local function ensureGoldPotion(player)
     }
     for _, product in ipairs(products) do
         local entry = shop["2_Boosts"] and shop["2_Boosts"][product.index]
-        assert(entry and entry.Tag == product.tag and entry.Currency == "Pumpkins" and entry.Cost == product.cost,
-            "Gold Potion product/price changed; purchases skipped.")
+        if not (entry and entry.Tag == product.tag and entry.Currency == "Pumpkins"
+            and entry.Cost == product.cost) then
+            potionUnavailable("Gold Potion product/price changed")
+            return
+        end
     end
     -- Market.Update binds Held to Pumpkins only when the Event category is selected.
     local market = awaitPath(interface, {"Market"})
@@ -2392,7 +2439,10 @@ local function ensureGoldPotion(player)
     end
     if not isVisible(market) then
         marketClick(awaitPath(interface, {"Topbar", "Main", "Categories", "Market", "Interact"}))
-        assert(waitForValue(function() return isVisible(market) end), "Market did not open; no purchase sent.")
+        if not waitForValue(function() return isVisible(market) end) then
+            potionUnavailable("Market did not open")
+            return
+        end
     end
     task.wait(1)
     local eventBoosts = awaitPath(market, {"Main", "Items", "2_Boosts"})
@@ -2401,13 +2451,19 @@ local function ensureGoldPotion(player)
         marketClick(awaitPath(market, {"Main", "Currency_Swap"}), "MouseButton1Click")
         task.wait(1)
     end
-    assert(eventBoosts.Visible and isVisible(market), "Event Shop unavailable; never falling back to Gems.")
+    if not (eventBoosts.Visible and isVisible(market)) then
+        potionUnavailable("Event Shop unavailable")
+        return
+    end
     local held = awaitPath(market, {"Main", "Held"})
     local items = require(ReplicatedStorage.Modules.Storage.Items)
     local currencyIcon = held:FindFirstChild("Currency")
     local pumpkin = items.Pumpkins
-    assert(pumpkin and currencyIcon and tostring(currencyIcon.Image):match("(%d+)$")
-        == tostring(pumpkin.Image):match("(%d+)$"), "Market currency is not confirmed as Pumpkins.")
+    if not (pumpkin and currencyIcon and tostring(currencyIcon.Image):match("(%d+)$")
+        == tostring(pumpkin.Image):match("(%d+)$")) then
+        potionUnavailable("Market currency is not confirmed as Pumpkins")
+        return
+    end
     local label = awaitPath(held, {"Amount"})
     local balance, lastBalance, stableSince
     local balanceDeadline = os.clock() + 20
@@ -2423,19 +2479,23 @@ local function ensureGoldPotion(player)
         if stableSince and os.clock() - stableSince >= (balance == 0 and 5 or 2) then break end
         task.wait(0.2)
     until os.clock() >= balanceDeadline
-    assert(balance and balance >= 0 and balance < math.huge, "Exact Pumpkins unavailable; purchases skipped.")
+    if not (balance and balance >= 0 and balance < math.huge) then
+        potionUnavailable("Exact Pumpkins unavailable")
+        return
+    end
     print("[POTION] Pumpkins available: " .. balance)
     local remote = awaitPath(ReplicatedStorage, {"Assets", "Remotes", "GET"})
     -- Recheck after claiming/UI transitions in case a potion was activated meanwhile.
     local current = timer()
-    assert(current, "Gold Potion timer unavailable after claims.")
+    if not current then
+        potionUnavailable("Gold Potion timer unavailable after claims")
+        return
+    end
     -- Ignore ten seconds of countdown drift; never buy another whole potion for that alone.
-    if current >= targetSeconds - 10 then return end
+    if current >= targetSeconds - 10 then return true end
     if balance < 999 then
         -- Not enough for even the cheapest potion: farm now, restock on a later Lobby cycle.
-        local shortageEnv = type(getgenv) == "function" and getgenv() or _G
-        shortageEnv.AutoPrestigePotionShort = true
-        print("[POTION] Not enough Pumpkins (" .. balance .. " < 999); farming without restock.")
+        potionUnavailable("Not enough Pumpkins (" .. balance .. " < 999)")
         return
     end
     local remainingSeconds = math.ceil((targetSeconds - current - 10) / 1800) * 1800
@@ -2483,10 +2543,29 @@ local function ensureGoldPotion(player)
     local final = timer()
     if final and final >= targetSeconds - 10 then
         print("[POTION] Target reached: " .. final .. "s | Pumpkins: " .. balance)
-    else
-        warn("[POTION] Target NOT reached: remaining=" .. tostring(final) .. "s / " .. targetSeconds
-            .. "s | Pumpkins=" .. balance .. "; continuing farm without claiming success.")
+        return true
     end
+    warn("[POTION] Target NOT reached: remaining=" .. tostring(final) .. "s / " .. targetSeconds
+        .. "s | Pumpkins=" .. balance .. "; continuing farm without claiming success.")
+end
+
+-- The potion step is optional: never block the mission on a failed purchase, and
+-- always close the Market panel it opened so Equipment/Create stays clickable.
+local function ensureGoldPotion(player)
+    local ok, result = pcall(purchaseGoldPotion, player)
+    closePanel(player, "Market")
+    if not ok then
+        potionUnavailable("Gold Potion step stopped: " .. tostring(result))
+        result = nil
+    end
+    -- goldBoostExpired treats the "used" flag as proof a potion was active. Keeping it
+    -- set with no boost returns every mission to Lobby immediately, so drop it when the
+    -- usable timer reads zero and no purchase was confirmed this cycle.
+    if result then return end
+    local boost = findPath(player, {"Boosts", "Gold"})
+    if boost and (boost:IsA("NumberValue") or boost:IsA("IntValue")) and boost.Value > 0 then return end
+    local env = type(getgenv) == "function" and getgenv() or _G
+    env.AutoPrestigeGoldPotionUsed = nil
 end
 
 local function waitLobbyAutoexec(player)
@@ -2543,14 +2622,15 @@ local function runPrestigeFlow()
     print("[AUTO PRESTIGE] Lobby: Achievements -> Quests -> Gold Potion -> Prestige -> Upgrades.")
     claimAllAchievements(player)
     local questsOK, questsError = pcall(claimQuestNotifications, player)
+    -- An open Quests panel blocks the Equipment/Market categories used later.
+    closePanel(player, "Quests")
     if not questsOK then
         warn("[AUTO PRESTIGE] Quests skipped; continuing Lobby setup: " .. tostring(questsError))
     end
     -- Prestige is checked before Upgrade All can spend the threshold balance.
-    local boosted, boostError = pcall(ensureGoldPotion, player)
-    if not boosted then warn("[AUTO PRESTIGE] Gold Potion skipped: " .. tostring(boostError)) end
-    -- Do not enter a mission without an active Gold boost: farming without it wastes a cycle,
-    -- and a missing replicated timer inside the mission would never trigger the Lobby return.
+    ensureGoldPotion(player)
+    -- A missing or zero Gold Boost must not stop the run: Pumpkins only drop inside
+    -- missions, so a fresh account has to farm without a boost before it can buy one.
     if configEnv.UseGoldBoost and configEnv.GoldPotionHours and configEnv.GoldPotionHours > 0 then
         local boostNow = findPath(player, {"Boosts", "Gold"})
         local remaining = boostNow and (boostNow:IsA("NumberValue") or boostNow:IsA("IntValue"))
@@ -2558,19 +2638,12 @@ local function runPrestigeFlow()
         if type(remaining) == "number" and remaining > 0 then
             print("[AUTO PRESTIGE] Gold Boost active: " .. math.floor(remaining) .. "s; entering mission.")
         elseif type(remaining) == "number" then
-            if configEnv.AutoPrestigePotionShort
-                or (type(getgenv) == "function" and getgenv().AutoPrestigePotionShort) then
-                warn("[AUTO PRESTIGE] Gold Boost unavailable (Pumpkins shortage); farming without it.")
-                if type(getgenv) == "function" then getgenv().AutoPrestigePotionShort = nil end
-            else
-                warn("[AUTO PRESTIGE] Gold Boost timer is zero; mission not started.")
-                return
-            end
+            warn("[AUTO PRESTIGE] Gold Boost timer is zero; entering mission without a boost.")
         else
             -- Mobile replication can lag behind the Lobby purchase. A missing timer is
             -- unknown, not proof of expiry; blocking here stalls the whole flow.
-            warn("[AUTO PRESTIGE] Gold Boost timer unreadable before mission; continuing on the "
-                .. "Lobby purchase confirmation.")
+            warn("[AUTO PRESTIGE] Gold Boost timer unreadable before mission; "
+                .. "continuing on the Lobby purchase confirmation.")
         end
     end
     tryPrestige(player)
