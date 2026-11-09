@@ -2510,8 +2510,13 @@ local function purchaseGoldPotion(player)
         if not product then break end
         assert(timer(), "Potion timer lost; stopping purchases.")
         print("[AUTO PRESTIGE] Buying " .. product.tag .. " for " .. product.cost .. " Pumpkins.")
+        print("[AUTO PRESTIGE] Buy request: 2_Boosts[" .. product.index .. "] cost "
+            .. product.cost .. " | Pumpkins " .. balance)
         local data = remote:InvokeServer("S_Market", "Buy", "2_Boosts", product.index, 1)
-        assert(type(data) == "table", "Potion purchase refused/unconfirmed; no retry.")
+        if type(data) ~= "table" then
+            error("Potion purchase refused (Pumpkins " .. balance .. ", server returned "
+                .. type(data) .. "); no retry.")
+        end
         local slot = data.Slots and data.Slots[data.Current_Slot]
         local remaining = slot and slot.Currency and slot.Currency.Pumpkins
         assert(type(remaining) == "number" and remaining >= 0 and remaining < balance,
