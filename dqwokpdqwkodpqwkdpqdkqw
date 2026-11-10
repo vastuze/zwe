@@ -7,15 +7,6 @@ if configEnv.UseGoldBoost == nil then
     warn("[AUTO PRESTIGE] Loader config missing: Gold Potion purchases disabled. Run loadstring.lua to apply your settings.")
 end
 if configEnv.GoldPotionHours == nil then configEnv.GoldPotionHours = 2 end
--- Temporary mobile isolation: do not open Quests automatically on touch devices.
-if configEnv.ClaimQuests == nil then
-    configEnv.ClaimQuests = not game:GetService("UserInputService").TouchEnabled
-end
-assert(type(configEnv.ClaimQuests) == "boolean", "ClaimQuests must be true or false.")
-if configEnv.QuestVirtualInput == nil then
-    configEnv.QuestVirtualInput = game:GetService("UserInputService").TouchEnabled
-end
-assert(type(configEnv.QuestVirtualInput) == "boolean", "QuestVirtualInput must be true or false.")
 if configEnv.WebhookURL == nil then configEnv.WebhookURL = "" end
 if configEnv.Height == nil then configEnv.Height = 400 end
 if configEnv.Speed == nil then configEnv.Speed = 350 end
@@ -379,14 +370,13 @@ local function awaitPath(root, names)
     return node
 end
 
-local function click(button, preferredEvent, stillNeeded, virtualOnly)
+local function click(button, preferredEvent, stillNeeded)
     assert(button:IsA("GuiButton"), "Not a UI button: " .. button:GetFullName())
     -- Instances can replicate before Effects.Hover installs their click callbacks.
     -- A preferred event keeps one-shot confirmations from firing both click signals.
     local events = preferredEvent and {preferredEvent} or {"MouseButton1Click", "Activated"}
     local deadline = os.clock() + 5
     repeat
-        if virtualOnly then break end
         if stillNeeded and not stillNeeded() then return end
         if type(getconnections) == "function" then
             for _, eventName in ipairs(events) do
@@ -421,44 +411,7 @@ local function click(button, preferredEvent, stillNeeded, virtualOnly)
     assert(size.X > 0 and size.Y > 0, "Button has no clickable size: " .. button.Name)
     local input = game:GetService("VirtualInputManager")
     local x, y = position.X + size.X / 2, position.Y + size.Y / 2
-    if virtualOnly then
-        local camera = workspace.CurrentCamera
-        assert(camera and x >= 0 and y >= 0 and x < camera.ViewportSize.X and y < camera.ViewportSize.Y,
-            "Quest input target is outside the screen; stopping instead of clicking elsewhere.")
-        local ancestor = button.Parent
-        while ancestor do
-            if ancestor:IsA("GuiObject") and ancestor.ClipsDescendants then
-                local p, s = ancestor.AbsolutePosition, ancestor.AbsoluteSize
-                assert(x >= p.X and y >= p.Y and x < p.X + s.X and y < p.Y + s.Y,
-                    "Quest input target is clipped; scroll it into view before retrying.")
-            end
-            ancestor = ancestor.Parent
-        end
-    end
     print("[AUTO PRESTIGE] Using virtual click: " .. button:GetFullName())
-    -- Mobile UIs often ignore emulated mouse input; prefer a real tap when the
-    -- executor supports it, and fall back to SendTouch before mouse.
-    if game:GetService("UserInputService").TouchEnabled then
-        local global = getfenv and getfenv(0) or {}
-        local tap = global.tap
-        local virtualTap = global.virtualtap or global.virtualTouch
-        local function touched()
-            if type(tap) == "function" then tap(x, y); return true end
-            if type(virtualTap) == "function" then virtualTap(x, y); return true end
-            if type(input.SendTouch) == "function" then
-                input:SendTouch(x, y, 0)
-                task.wait(0.1)
-                input:SendTouch(x, y, 2)
-                return true
-            end
-            return false
-        end
-        if touched() then
-            task.wait(0.15)
-            return
-        end
-        print("[AUTO PRESTIGE] No touch API available; using emulated mouse.")
-    end
     input:SendMouseMoveEvent(x, y, game)
     task.wait(0.05)
     if stillNeeded and not stillNeeded() then return end
@@ -678,117 +631,6 @@ local function readDifficulty(player)
     assert(difficulty, "No eligible difficulty for Grade " .. tostring(grade))
     print("[AUTO PRESTIGE] Step 1.5: Grade " .. grade .. " -> " .. difficulty)
     return difficulty
-end
-
-local function claimAllAchievements(player)
-    local interface = awaitPath(player, {"PlayerGui", "Interface"})
-    local ui = awaitPath(interface, {"Achievements"})
-    local achievementIcon = awaitPath(interface, {"Topbar", "Main", "Icons", "Achievements"})
-    local notification = awaitPath(achievementIcon, {"New"})
-    -- The game exposes claimable achievements through this notification.
-    -- Do not open the menu at all if no reward is advertised.
-    if not isVisible(ui) and not notification.Visible then
-        print("[AUTO PRESTIGE] 3.7: No new achievements; skipping Claim UI.")
-        return
-    end
-    local titles = require(ReplicatedStorage.Modules.Storage.Titles)
-    local list = awaitPath(ui, {"List", "Inner"})
-    local confirmed, failures = 0, 0
-    local function waitUntil(callback, description)
-        local deadline = os.clock() + 10
-        repeat
-            if callback() then return end
-            task.wait(0.1)
-        until os.clock() >= deadline
-        error("Achievements timeout: " .. description)
-    end
-    local function buttonOf(object)
-        if object:IsA("GuiButton") then return object end
-        local button = object:FindFirstChild("Interact", true)
-        assert(button and button:IsA("GuiButton"), "Achievements button missing: " .. object.Name)
-        return button
-    end
-    local close = awaitPath(ui, {"Top", "Achievements_Close"})
-    local function categoriesVisible()
-        for _, category in pairs(titles) do
-            if list:FindFirstChild(category.Tag) then return true end
-        end
-        return false
-    end
-    local function backToCategories()
-        if categoriesVisible() then return end
-        click(buttonOf(close))
-        waitUntil(categoriesVisible, "return to categories")
-        task.wait(0.3)
-    end
-    local ok, err = pcall(function()
-        if not isVisible(ui) then
-            click(achievementIcon)
-            waitUntil(function() return isVisible(ui) end, "open UI")
-            task.wait(0.7)
-        end
-        backToCategories()
-        -- Revisit notifications after claims unlock meta achievements.
-        -- Never enter a category without its own New indicator.
-        for _ = 1, 5 do
-            local beforePass = confirmed
-            for _, category in ipairs(titles) do
-                backToCategories()
-                local row = list:FindFirstChild(category.Tag)
-                assert(row, "Missing achievement category: " .. category.Tag)
-                local categoryNew = findPath(row, {"Inner", "Icon", "New"})
-                if categoryNew and categoryNew.Visible then
-                click(buttonOf(row))
-                waitUntil(function() return not categoriesVisible() end, "open " .. category.Tag)
-                task.wait(0.4)
-                local attempted = {}
-                while true do
-                    local pending
-                    for _, entry in ipairs(list:GetChildren()) do
-                        local inner = entry:FindFirstChild("Inner")
-                        if inner then
-                            for _, name in ipairs({"A_State", "C_State"}) do
-                                local state = inner:FindFirstChild(name)
-                                local label = state and state:FindFirstChild("Title")
-                                if label and label.Text:upper() == "CLAIM" and isVisible(state)
-                                    and not attempted[state] then pending = state; break end
-                            end
-                        end
-                        if pending then break end
-                    end
-                    if not pending then break end
-                    attempted[pending] = true
-                    -- Dispatch the game's handler: Claim vs Category and cache/Gems updates
-                    -- are handled by Achievements.Continue. Never click EQUIP/UNEQUIP.
-                    click(buttonOf(pending))
-                    local deadline = os.clock() + 3
-                    local changed = false
-                    repeat
-                        task.wait(0.1)
-                        local label = pending:FindFirstChild("Title")
-                        changed = not isVisible(pending) or (label and label.Text:upper() ~= "CLAIM")
-                        if changed then break end
-                    until os.clock() >= deadline
-                    if changed then confirmed = confirmed + 1
-                    else
-                        failures = failures + 1
-                        warn("[AUTO PRESTIGE] 3.7: Claim not confirmed in " .. category.Tag)
-                    end
-                    task.wait(0.25)
-                end
-                end
-            end
-            if confirmed == beforePass or failures > 0 then break end
-        end
-    end)
-    -- Close the menu before Equipment/Create; open Achievements blocks other buttons.
-    if isVisible(ui) then
-        backToCategories()
-        click(buttonOf(close))
-        waitUntil(function() return not isVisible(ui) end, "close UI")
-    end
-    if not ok then error(err) end
-    print("[AUTO PRESTIGE] 3.7: " .. confirmed .. " claims confirmed across categories; " .. failures .. " unconfirmed.")
 end
 
 local function tryPrestige(player)
@@ -2243,101 +2085,6 @@ local function ensureLobby2D(player)
     error("Lobby menu did not appear after POST Switch 2D + Tab.")
 end
 
-local function claimQuestNotifications(player)
-    if not configEnv.ClaimQuests then
-        print("[AUTO PRESTIGE] Quests disabled by ClaimQuests; continuing without opening Quests.")
-        return
-    end
-    local interface = awaitPath(player, {"PlayerGui", "Interface"})
-    local function questClick(button)
-        click(button, "MouseButton1Click", nil, configEnv.QuestVirtualInput)
-    end
-    local ui = awaitPath(interface, {"Quests"})
-    local function waitUI(check, message)
-        assert(waitForValue(check), message)
-    end
-    if not isVisible(ui) then
-        print("[AUTO PRESTIGE] Waiting for Quests button initialization...")
-        local deadline = os.clock() + 60
-        local button, stableSince
-        repeat
-            button = findPath(interface, {"Topbar", "Main", "Categories", "Quests", "Interact"})
-            local ready = button and button:IsA("GuiButton") and isVisible(button)
-            if ready and not configEnv.QuestVirtualInput and type(getconnections) == "function" then
-                local ok, handlers = pcall(function() return getconnections(button.MouseButton1Click) end)
-                -- Some executors cannot expose handlers; allow the input fallback after a bounded wait.
-                if ok and type(handlers) == "table" then
-                    ready = false
-                    for _, connection in pairs(handlers) do
-                        if connection.Enabled ~= false then ready = true; break end
-                    end
-                end
-            end
-            if ready then stableSince = stableSince or os.clock() else stableSince = nil end
-            if stableSince and os.clock() - stableSince >= 1 then break end
-            if isVisible(ui) then break end
-            task.wait(0.25)
-        until os.clock() >= deadline
-        for attempt = 1, 3 do
-            if isVisible(ui) then break end
-            button = findPath(interface, {"Topbar", "Main", "Categories", "Quests", "Interact"})
-            assert(button and isVisible(button), "Quests entry is unavailable after initialization wait.")
-            print("[AUTO PRESTIGE] Opening Quests, attempt " .. attempt .. "/3")
-            questClick(button)
-            local openedDeadline = os.clock() + 5
-            repeat
-                if isVisible(ui) then break end
-                task.wait(0.1)
-            until os.clock() >= openedDeadline
-        end
-        assert(isVisible(ui), "Quests did not open after initialization wait and 3 attempts.")
-        task.wait(1)
-    end
-    local tabs = {{"Main", "Q_1"}, {"Side", "Q_2"}, {"Spears", "Q_2.1"},
-        {"Daily", "Q_4"}, {"Weekly", "Q_5"}}
-    for week = 1, 10 do tabs[#tabs + 1] = {"Week_" .. week, string.format("Q_7.%02d", week)} end
-    local categories = awaitPath(ui, {"Main", "Quests"})
-    local details = awaitPath(ui, {"Main", "Details"})
-    for _, tab in ipairs(tabs) do
-        local row = categories:FindFirstChild(tab[2])
-        local badge = row and findPath(row, {"Inner", "Title", "New"})
-        if row and isVisible(row) and badge and isVisible(badge)
-            and (not (badge:IsA("ImageLabel") or badge:IsA("ImageButton")) or badge.ImageTransparency < 0.99) then
-            task.wait(0.3)
-            questClick(awaitPath(row, {"Inner", "Interact"}))
-            waitUI(function()
-                local title = findPath(details, {"Title", "Title"})
-                return title and title.Text:upper() == tab[1]:gsub("_", " "):upper() .. " QUESTS"
-                    and isVisible(details)
-            end, "Quest category did not open: " .. tab[1])
-            task.wait(0.75)
-            local attempted = {}
-            while true do
-                assert(isVisible(ui), "Quests closed during claims.")
-                local button, claimed, tag
-                for _, quest in ipairs(details.Quests:GetChildren()) do
-                    local candidate = findPath(quest, {"Inner", "Claim", "Button"})
-                    local name = candidate and candidate:GetAttribute("Tag")
-                    if candidate and isVisible(candidate) and type(name) == "string"
-                        and candidate:GetAttribute("Category") == tab[1] and not attempted[name] then
-                        button, tag = candidate, name
-                        claimed = findPath(quest, {"Inner", "Claimed"})
-                        break
-                    end
-                end
-                if not button then break end
-                attempted[tag] = true
-                task.wait(0.3)
-                questClick(button)
-                waitUI(function()
-                    return button.Parent and button:GetAttribute("Tag") == nil and claimed and isVisible(claimed)
-                end, "Quest claim not confirmed; no retry: " .. tag)
-                print("[AUTO PRESTIGE] Quest claimed: " .. tag)
-            end
-        end
-    end
-end
-
 local function closePanel(player, panelName)
     local interface = findPath(player, {"PlayerGui", "Interface"})
     local panel = interface and interface:FindFirstChild(panelName)
@@ -2432,10 +2179,8 @@ local function purchaseGoldPotion(player)
     end
     -- Market.Update binds Held to Pumpkins only when the Event category is selected.
     local market = awaitPath(interface, {"Market"})
-    local touchInput = game:GetService("UserInputService").TouchEnabled
     local function marketClick(button, preferredEvent)
-        -- Phone UI needs the existing press/release path; PC keeps signal dispatch.
-        click(button, preferredEvent, nil, touchInput)
+        click(button, preferredEvent)
     end
     if not isVisible(market) then
         marketClick(awaitPath(interface, {"Topbar", "Main", "Categories", "Market", "Interact"}))
@@ -2580,11 +2325,9 @@ local function waitLobbyAutoexec(player)
     repeat
         local ui = findPath(player, {"PlayerGui", "Interface"})
         local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
-        local ready = root and ui and findPath(ui, {"Topbar", "Main", "Categories", "Quests", "Interact"})
-            and findPath(ui, {"Topbar", "Main", "Categories", "Equipment", "Interact"})
-            and findPath(ui, {"Topbar", "Main", "Icons", "Achievements"})
-            and findPath(ui, {"Quests", "Main", "Details"})
-            and ui:FindFirstChild("Equipment") and ui:FindFirstChild("Achievements")
+        local ready = root and ui and findPath(ui, {"Topbar", "Main", "Categories", "Equipment", "Interact"})
+            and findPath(ui, {"Topbar", "Main", "Categories", "Market", "Interact"})
+            and ui:FindFirstChild("Equipment") and ui:FindFirstChild("Market")
             and findPath(player, {"Boosts", "Gold"})
         if ready and ui == previousUI then
             stableSince = stableSince or os.clock()
@@ -2624,14 +2367,7 @@ local function runPrestigeFlow()
 
     -- Background balance capture must run in Lobby too, to carry Gold/Gems into map.
     startRewardsWebhook()
-    print("[AUTO PRESTIGE] Lobby: Achievements -> Quests -> Gold Potion -> Prestige -> Upgrades.")
-    claimAllAchievements(player)
-    local questsOK, questsError = pcall(claimQuestNotifications, player)
-    -- An open Quests panel blocks the Equipment/Market categories used later.
-    closePanel(player, "Quests")
-    if not questsOK then
-        warn("[AUTO PRESTIGE] Quests skipped; continuing Lobby setup: " .. tostring(questsError))
-    end
+    print("[AUTO PRESTIGE] Lobby: Gold Potion -> Prestige -> Upgrades.")
     -- Prestige is checked before Upgrade All can spend the threshold balance.
     ensureGoldPotion(player)
     -- A missing or zero Gold Boost must not stop the run: Pumpkins only drop inside
