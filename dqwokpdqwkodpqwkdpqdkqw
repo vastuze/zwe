@@ -618,13 +618,10 @@ local function readDifficulty(player)
     local watcher = env.AutoPrestigeRewardsWatcher
     if watcher and watcher.refreshBalance then watcher.refreshBalance() end
 
-    -- Highest unlocked Missions difficulty; Freedom additionally needs Prestige 3.
-    -- The live slot Prestige is unavailable here, so do not infer it from Grade.
+    -- Cap at Aberrant: Freedom is too hard to clear reliably, so never select it.
     local difficulty
-    local prestige = player:GetAttribute("Prestige")
     for _, requirement in ipairs(values.Difficulty_Potential.Missions) do
-        if gradeIndex >= requirement[2]
-            and (requirement[1] ~= "Freedom" or (type(prestige) == "number" and prestige >= 3)) then
+        if gradeIndex >= requirement[2] and requirement[1] ~= "Freedom" then
             difficulty = requirement[1]
         end
     end
