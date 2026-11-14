@@ -20,7 +20,6 @@ if configEnv.Modifiers == nil then
     configEnv.Modifiers = {"No Perks", "No Skills", "No Memories", "Nightmare", "Injury Prone",
         "Chronic Injuries", "Fog", "Glass Cannon", "Time Trial", "Fatigue", "Evolution"}
 end
-if configEnv.WebhookImageURL == nil then configEnv.WebhookImageURL = "https://cdn.discordapp.com/attachments/983578378370170911/1568333579883384972/1781178911498_z7o8gg4.png?ex=6aef6ff7&is=6aee1e77&hm=b9eefe3c083a463fceeb9791566751d8c37e09668e1d65c9a9a39fa297d74765&" end
 assert(type(configEnv.UseGoldBoost) == "boolean",
     "UseGoldBoost must be true or false WITHOUT quotes; received " .. type(configEnv.UseGoldBoost))
 assert(type(configEnv.PrestigeSettings) == "table", "PrestigeSettings must be a table.")
@@ -47,9 +46,7 @@ if configEnv.UseGoldBoost then
         "GoldPotionHours must be a non-negative multiple of 0.5 hours.")
 end
 assert(type(configEnv.WebhookURL) == "string", "WebhookURL must be a string.")
-assert(type(configEnv.WebhookImageURL) == "string"
-    and (configEnv.WebhookImageURL == "" or configEnv.WebhookImageURL:match("^https://%S+$")),
-    "WebhookImageURL must be empty or a public HTTPS image URL.")
+assert(configEnv.VipCode == nil or type(configEnv.VipCode) == "string", "VipCode must be a string or omitted.")
 for _, key in ipairs({"Height", "Speed"}) do
     local value = configEnv[key]
     assert(type(value) == "number" and value == value and value > 0 and value < math.huge,
@@ -352,7 +349,9 @@ local function selectLobby()
         if get and get:IsA("RemoteFunction") then return get end
     end)
     if not remote then error("Assets.Remotes.GET did not load.") end
-    remote:InvokeServer("Functions", "Teleport", "Lobby", nil)
+    local vipCode = configEnv.VipCode
+    if vipCode == "" then vipCode = nil end
+    remote:InvokeServer("Functions", "Teleport", "Lobby", vipCode)
     -- A successful invocation is a request, not proof that teleport completed.
     print("[AUTO PRESTIGE] Step 1: selected Slot A and requested Lobby teleport.")
     return false
@@ -1424,7 +1423,7 @@ local function resultColor(stateText)
     return 9807270
 end
 
-local function send(fields, stateText, useThumbnail)
+local function send(fields, stateText)
     if not app.webhook then return false, "Webhook disabled", 1 end
     local requestCall = request or http_request
     if type(requestCall) ~= "function" and type(syn) == "table" then requestCall = syn.request end
@@ -1438,8 +1437,6 @@ local function send(fields, stateText, useThumbnail)
                 allowed_mentions = {parse = {}},
                 embeds = {{title = "Attack on titan revolution - " .. player.Name, color = resultColor(stateText),
                     fields = fields,
-                    image = not useThumbnail and configEnv.WebhookImageURL ~= "" and {url = configEnv.WebhookImageURL} or nil,
-                    thumbnail = useThumbnail and configEnv.WebhookImageURL ~= "" and {url = configEnv.WebhookImageURL} or nil,
                     timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ")}},
             }),
         })
@@ -1532,7 +1529,7 @@ task.spawn(function()
             if not app.webhook then sent = true; return end
             watcher.readyMain = main
             attempts = attempts + 1
-            local success, reason, delay = send(makeFields(interface, main, rows, goldSummary), state.Text, true)
+            local success, reason, delay = send(makeFields(interface, main, rows, goldSummary), state.Text)
             if success then
                 sent = true
                 print("[WEBHOOK] Da gui ket qua tran thanh cong (HTTP 2xx).")
