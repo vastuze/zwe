@@ -48,6 +48,7 @@ if configEnv.UseGoldBoost then
         "GoldPotionHours must be a non-negative multiple of 0.5 hours.")
 end
 assert(type(configEnv.WebhookURL) == "string", "WebhookURL must be a string.")
+
 assert(type(configEnv.AccessCode) == "string" and configEnv.AccessCode ~= "",
     "AccessCode must be a non-empty string.")
 for _, key in ipairs({"Height", "Speed"}) do
