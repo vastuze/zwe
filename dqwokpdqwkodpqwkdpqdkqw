@@ -8,6 +8,8 @@ if configEnv.UseGoldBoost == nil then
 end
 if configEnv.GoldPotionHours == nil then configEnv.GoldPotionHours = 2 end
 if configEnv.WebhookURL == nil then configEnv.WebhookURL = "" end
+-- Access Code typed on the title screen to unlock the Lobby entry.
+if configEnv.AccessCode == nil then configEnv.AccessCode = "FDC0E702" end
 if configEnv.Height == nil then configEnv.Height = 400 end
 if configEnv.Speed == nil then configEnv.Speed = 350 end
 if configEnv.PrestigeSettings == nil then
@@ -46,7 +48,8 @@ if configEnv.UseGoldBoost then
         "GoldPotionHours must be a non-negative multiple of 0.5 hours.")
 end
 assert(type(configEnv.WebhookURL) == "string", "WebhookURL must be a string.")
-assert(configEnv.VipCode == nil or type(configEnv.VipCode) == "string", "VipCode must be a string or omitted.")
+assert(type(configEnv.AccessCode) == "string" and configEnv.AccessCode ~= "",
+    "AccessCode must be a non-empty string.")
 for _, key in ipairs({"Height", "Speed"}) do
     local value = configEnv[key]
     assert(type(value) == "number" and value == value and value > 0 and value < math.huge,
@@ -246,116 +249,9 @@ local function isVisible(button)
     return true
 end
 
-local function selectSlot(button)
-    -- Use one signal only, so the same selection is not dispatched twice.
-    if type(getconnections) == "function" then
-        for _, eventName in ipairs({"MouseButton1Click", "Activated"}) do
-            local inspected, handlers = pcall(function() return getconnections(button[eventName]) end)
-            if inspected and type(handlers) == "table" then
-                local usable = {}
-                for _, connection in ipairs(handlers) do
-                    local accessible, fire = pcall(function()
-                        if connection.Enabled == false then return nil end
-                        return connection.Fire
-                    end)
-                    if accessible and type(fire) == "function" then
-                        usable[#usable + 1] = connection
-                    end
-                end
-                if #usable > 0 then
-                    local failed = false
-                    for _, connection in ipairs(usable) do
-                        local fired = pcall(function()
-                            if eventName == "Activated" then connection:Fire(nil, 1)
-                            else connection:Fire() end
-                        end)
-                        failed = failed or not fired
-                    end
-                    if failed then error("A Select_A callback failed; refusing duplicate input.") end
-                    return
-                end
-            end
-        end
-    end
-
-    -- Same virtual-input fallback as the source selection flow.
-    local gui = game:GetService("GuiService")
-    local virtualInput = game:GetService("VirtualInputManager")
-    local previousSelectable = button.Selectable
-    local previousSelection = gui.SelectedObject
-    local function key(code)
-        virtualInput:SendKeyEvent(true, code, false, game)
-        task.wait(0.05)
-        virtualInput:SendKeyEvent(false, code, false, game)
-    end
-    local ok, message = pcall(function()
-        key(Enum.KeyCode.BackSlash)
-        task.wait(0.1)
-        button.Selectable = true
-        gui.SelectedObject = button
-        task.wait(0.1)
-        if gui.SelectedObject ~= button then error("Select_A could not be focused.") end
-        key(Enum.KeyCode.Return)
-        task.wait(0.8)
-        if not isVisible(button) then return end
-        gui.SelectedObject = nil
-        local position, size = button.AbsolutePosition, button.AbsoluteSize
-        if size.X <= 0 or size.Y <= 0 then error("Select_A has no visible size.") end
-        local x, y = position.X + size.X / 2, position.Y + size.Y / 2
-        virtualInput:SendMouseMoveEvent(x, y, game)
-        task.wait(0.05)
-        virtualInput:SendMouseButtonEvent(x, y, 0, true, game, 0)
-        task.wait(0.1)
-        virtualInput:SendMouseButtonEvent(x, y, 0, false, game, 0)
-    end)
-    pcall(function()
-        virtualInput:SendKeyEvent(false, Enum.KeyCode.BackSlash, false, game)
-        virtualInput:SendKeyEvent(false, Enum.KeyCode.Return, false, game)
-        local position = button.AbsolutePosition
-        virtualInput:SendMouseButtonEvent(position.X, position.Y, 0, false, game, 0)
-    end)
-    pcall(function()
-        if gui.SelectedObject == button then gui.SelectedObject = previousSelection end
-        button.Selectable = previousSelectable
-    end)
-    if not ok then error("Slot A input failed: " .. tostring(message)) end
-end
-
-local function selectLobby()
-    if not waitForValue(function() return game:IsLoaded() end) then
-        error("Game did not finish loading within 30 seconds.")
-    end
-    if not lobbyPlaces[game.GameId] then error("Unsupported game; no known lobby place.") end
-    if lobbyPlaces[game.GameId] == game.PlaceId then
-        print("[AUTO PRESTIGE] Step 1 complete: already in Lobby.")
-        return true
-    end
-    local player = waitForValue(function() return Players.LocalPlayer end)
-    if not player then error("LocalPlayer did not load.") end
-    local button = waitForValue(function()
-        local node = player:FindFirstChild("PlayerGui")
-        for _, name in ipairs({"Interface", "Title_Screen", "Slots", "A", "Select_A"}) do
-            node = node and node:FindFirstChild(name)
-        end
-        if node and node:IsA("GuiButton") and isVisible(node) then return node end
-    end)
-    if not button then error("Visible Select_A button did not load; start from the slot-selection screen.") end
-    selectSlot(button)
-    task.wait(1)
-    local remote = waitForValue(function()
-        local assets = ReplicatedStorage:FindFirstChild("Assets")
-        local remotes = assets and assets:FindFirstChild("Remotes")
-        local get = remotes and remotes:FindFirstChild("GET")
-        if get and get:IsA("RemoteFunction") then return get end
-    end)
-    if not remote then error("Assets.Remotes.GET did not load.") end
-    local vipCode = configEnv.VipCode
-    if vipCode == "" then vipCode = nil end
-    remote:InvokeServer("Functions", "Teleport", "Lobby", vipCode)
-    -- A successful invocation is a request, not proof that teleport completed.
-    print("[AUTO PRESTIGE] Step 1: selected Slot A and requested Lobby teleport.")
-    return false
-end
+-- The slot-selection teleport was replaced by the Access Code flow below:
+-- open the Codes panel, submit the code, dismiss the confirmation prompt with
+-- "No" and retry, then click the Lobby entry that appears once it is accepted.
 
 local function findPath(root, names)
     local node = root
@@ -432,6 +328,177 @@ local function click(button, preferredEvent, stillNeeded)
         input:SendMouseButtonEvent(x, y, 0, false, game, 0)
     end)
     if not ok then error(message) end
+end
+
+--==================== Step 1: Access Code -> Lobby entry ====================
+-- The Slot_A click + GET teleport is replaced: the title screen requires the
+-- Access Code before the Lobby entry appears. Submitting it may answer with a
+-- Warning prompt whose "No" button must be clicked before trying again.
+local function fireSignal(signal, ...)
+    if not signal then return false end
+    local args = table.pack(...)
+    local function dispatch(target)
+        return (pcall(function() target:Fire(table.unpack(args, 1, args.n)) end))
+    end
+    if type(getconnections) == "function" then
+        local ok, connections = pcall(function() return getconnections(signal) end)
+        if ok and type(connections) == "table" then
+            local fired = false
+            for _, connection in ipairs(connections) do
+                fired = dispatch(connection) or fired
+            end
+            if fired then return true end
+        end
+    end
+    -- Some executors block direct signal access; never fail the run on this path.
+    return dispatch(signal)
+end
+
+local function getSignal(instance, name)
+    local ok, signal = pcall(function() return instance[name] end)
+    if ok then return signal end
+end
+
+local function accessCodeBox(interface)
+    local function firstBox(root)
+        if not root then return nil end
+        local fallback
+        for _, node in ipairs(root:GetDescendants()) do
+            if node:IsA("TextBox") and isVisible(node) then
+                local tag = (node.Name .. " " .. tostring(node.Parent and node.Parent.Name or "")):lower()
+                if tag:find("code", 1, true) then return node end
+                fallback = fallback or node
+            end
+        end
+        return fallback
+    end
+    -- VIP_Servers.Main.Code holds the box in the current build (its Interact is the TextBox).
+    return firstBox(findPath(interface, {"Title_Screen", "VIP_Servers", "Main"}))
+        or firstBox(findPath(interface, {"Title_Screen"}))
+end
+
+local function lobbyEntry(interface)
+    local node = findPath(interface, {"Lobbies", "Main", "Inner", "Lobby", "Inner", "Interact"})
+    if node and node:IsA("GuiButton") and isVisible(node) then return node end
+end
+
+local function warningNo(interface)
+    local node = findPath(interface, {"Warning", "Prompt", "Main", "No"})
+    if node and node:IsA("GuiButton") and isVisible(node) then return node end
+end
+
+local function submitAccessCode(interface, code)
+    local box = accessCodeBox(interface)
+    if not box then
+        local button = findPath(interface, {"Title_Screen", "Buttons", "Codes", "Interact"})
+        if not (button and button:IsA("GuiButton") and isVisible(button)) then return false end
+        click(button, "MouseButton1Click")
+        local deadline = os.clock() + 8
+        repeat
+            box = accessCodeBox(interface)
+            if box then break end
+            task.wait(0.2)
+        until os.clock() >= deadline
+    end
+    if not box then return false end
+    pcall(function() box:CaptureFocus() end)
+    task.wait(0.15)
+    -- Clear first so a re-opened panel still emits TextChanged for the same code.
+    pcall(function() box.Text = "" end)
+    task.wait(0.1)
+    local written = pcall(function() box.Text = code end)
+    if not written or box.Text ~= code then
+        warn("[AUTO PRESTIGE] Step 1: Access Code not written: " .. tostring(box.Text))
+        return false
+    end
+    -- Enter submits: release focus with enterPressed, then send a real Return key.
+    pcall(function() box:ReleaseFocus(true) end)
+    fireSignal(getSignal(box, "FocusLost"), true)
+    local input = game:GetService("VirtualInputManager")
+    pcall(function()
+        input:SendKeyEvent(true, Enum.KeyCode.Return, false, game)
+        task.wait(0.05)
+        input:SendKeyEvent(false, Enum.KeyCode.Return, false, game)
+    end)
+    print("[AUTO PRESTIGE] Step 1: entered Access Code " .. tostring(code))
+    return true
+end
+
+local function clickLobbyEntry(interface)
+    local entry = lobbyEntry(interface)
+    if not entry then return false end
+    -- A click is a request, not proof the teleport completed; retry while the
+    -- entry is still on screen and no confirmation prompt took over.
+    for attempt = 1, 2 do
+        if not (entry.Parent and isVisible(entry)) or warningNo(interface) then break end
+        print("[AUTO PRESTIGE] Step 1: clicking the Lobby entry (attempt " .. attempt .. ").")
+        click(entry, "MouseButton1Click")
+        task.wait(2)
+    end
+    return true
+end
+
+local function selectLobby()
+    if not waitForValue(function() return game:IsLoaded() end) then
+        error("Game did not finish loading within 30 seconds.")
+    end
+    if not lobbyPlaces[game.GameId] then error("Unsupported game; no known lobby place.") end
+    if lobbyPlaces[game.GameId] == game.PlaceId then
+        print("[AUTO PRESTIGE] Step 1 complete: already in Lobby.")
+        return true
+    end
+    local player = waitForValue(function() return Players.LocalPlayer end)
+    if not player then error("LocalPlayer did not load.") end
+    local interface = waitForValue(function()
+        local folder = player:FindFirstChild("PlayerGui")
+        return folder and folder:FindFirstChild("Interface")
+    end)
+    if not interface then error("PlayerGui.Interface did not load.") end
+    local code = configEnv.AccessCode
+    local refused, unconfirmed = 0, 0
+    local deadline = os.clock() + 300
+    while os.clock() < deadline do
+        if clickLobbyEntry(interface) then return false end
+
+        local prompt = warningNo(interface)
+        if prompt then
+            refused = refused + 1
+            print("[AUTO PRESTIGE] Step 1: confirmation prompt shown; clicking No (prompt "
+                .. refused .. ") and retrying.")
+            click(prompt, "MouseButton1Click")
+            task.wait(1)
+        elseif submitAccessCode(interface, code) then
+            local settleUntil, entry = os.clock() + 8, nil
+            repeat
+                entry = lobbyEntry(interface)
+                if entry then break end
+                prompt = warningNo(interface)
+                if prompt then break end
+                task.wait(0.2)
+            until os.clock() >= settleUntil
+            if entry then
+                print("[AUTO PRESTIGE] Step 1: Lobby entry is visible; clicking it.")
+                click(entry, "MouseButton1Click")
+                task.wait(1)
+                return false
+            elseif prompt then
+                refused = refused + 1
+                print("[AUTO PRESTIGE] Step 1: confirmation prompt shown; clicking No (prompt "
+                    .. refused .. ") and retrying.")
+                click(prompt, "MouseButton1Click")
+                task.wait(1)
+            else
+                unconfirmed = unconfirmed + 1
+                print("[AUTO PRESTIGE] Step 1: Access Code not confirmed yet (attempt "
+                    .. unconfirmed .. ").")
+                task.wait(1)
+            end
+        else
+            -- Codes button or panel not ready yet; poll again instead of failing the run.
+            task.wait(1)
+        end
+    end
+    error("Access Code did not unlock the Lobby entry within 5 minutes.")
 end
 
 local function openEquipment(interface)
@@ -2349,7 +2416,7 @@ local function runPrestigeFlow()
         return
     end
 
-    -- Menu: select Slot A and request Lobby; never run Lobby UI in the menu.
+    -- Menu: enter the Access Code and click the Lobby entry; never run Lobby UI in the menu.
     if not selectLobby() then
         print("[AUTO PRESTIGE] Re-run in Lobby: Claim All -> Upgrade All -> Grade -> mission.")
         return
