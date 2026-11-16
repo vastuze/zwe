@@ -172,26 +172,25 @@ local function startLobbyTimer()
     if type(plan) ~= "table" or plan.userId ~= player.UserId or plan.gameId ~= game.GameId then plan = nil end
 
     local prestigeGoldTarget = prestigeTarget(player)
-    local isMaxGrade = plan and (plan.isMaxGrade or (plan.currentGrade and tostring(plan.currentGrade):upper():find("S")))
+    local isMaxGrade = plan and (plan.isMaxGrade or (plan.potential and plan.potential >= 15) or (plan.currentGrade and tostring(plan.currentGrade):upper():find("S")))
     local gradeGoldTarget = not isMaxGrade and plan and type(plan.goldTarget) == "number" and plan.goldTarget > 0 and plan.goldTarget or nil
 
-    -- Player is maxed if they cannot prestige (target == nil) AND cannot upgrade grade (target == nil)
-    local isMaxed = (prestigeGoldTarget == nil) and (gradeGoldTarget == nil)
-
+    -- When Grade is S- (or max), there is NO gear upgrade return target.
+    -- Continuous Mission Farming: never force return to Lobby on a timer deadline.
     local timer = {
         jobId = game.JobId,
         placeId = game.PlaceId,
         gradePlan = plan,
         prestigeGoldTarget = prestigeGoldTarget,
-        deadline = isMaxed and nil or (os.clock() + 600),
+        deadline = nil,
     }
     env.AutoPrestigeLobbyTimer = timer
     goldBoostExpired(timer, player)
 
-    if isMaxed then
-        print("[AUTO PRESTIGE] Max Prestige & Max Grade (S-) detected: Infinite Mission Farming active (no Lobby timer).")
+    if isMaxGrade then
+        print("[AUTO PRESTIGE] Max Grade (S-) detected: Continuous Mission Farming active (no periodic Lobby timer).")
     else
-        print("[AUTO PRESTIGE] In mission: Lobby return target active (fallback: 600 seconds).")
+        print("[AUTO PRESTIGE] In mission: Farming until next Grade upgrade target or Gold Boost expiry.")
     end
 
     task.spawn(function()
@@ -203,7 +202,7 @@ local function startLobbyTimer()
             local watcher = env.AutoPrestigeRewardsWatcher
             local gold = watcher and watcher.balance and watcher.balance()
 
-            if prestigeGoldTarget and type(gold) == "number" and gold >= prestigeGoldTarget then
+            if prestigeGoldTarget and not env.AutoPrestigeNotEligible and type(gold) == "number" and gold >= prestigeGoldTarget then
                 timer.reason = "Prestige Gold target reached"
                 break
             end
@@ -211,16 +210,7 @@ local function startLobbyTimer()
                 timer.reason = "Enough Gold for Grade " .. tostring(plan.targetGrade)
                 break
             end
-            if timer.deadline then
-                local remaining = timer.deadline - os.clock()
-                if remaining <= 0 then
-                    timer.reason = "10 minutes elapsed"
-                    break
-                end
-                task.wait(math.min(remaining, 1))
-            else
-                task.wait(1)
-            end
+            task.wait(1)
         end
         while env.AutoPrestigeLobbyTimer == timer and inMission() do
             timer.leaving = true
@@ -639,10 +629,22 @@ local function readDifficulty(player)
         local title = findPath(equipment, {"Categories", "Upgrades", "Main", "Title"})
         if not title then return nil end
         local text = title.Text:gsub("<[^>]*>", ""):upper()
-        grade = text:match("%[([A-S][%+%-]?)%s+GRADE%]")
-            or text:match("%[GRADE%s+([A-S][%+%-]?)%]")
-        for index, tag in pairs(values.Pot_Tags) do
-            if tag == grade then gradeIndex = index; return true end
+        grade = text:match("%[([A-S][%+%-]?)%s*GRADE%]")
+            or text:match("%[GRADE%s*([A-S][%+%-]?)%]")
+            or text:match("%[([A-S][%+%-]?)%]")
+        if grade then
+            for index, tag in pairs(values.Pot_Tags) do
+                if tag == grade then gradeIndex = index; return true end
+            end
+        end
+        for index = 15, 0, -1 do
+            local tag = values.Pot_Tags[index]
+            if tag and (text:find("%[" .. tag:gsub("%+", "%%+"):gsub("%-", "%%-") .. "%]")
+                or text:find("%f[%a]" .. tag:gsub("%+", "%%+"):gsub("%-", "%%-") .. "%f[%A]")) then
+                gradeIndex = index
+                grade = tag
+                return true
+            end
         end
     end)
     assert(found, "Could not read Equipment Grade.")
@@ -690,6 +692,8 @@ local function readDifficulty(player)
 end
 
 local function tryPrestige(player)
+    local env = type(getgenv) == "function" and getgenv() or _G
+    env.AutoPrestigeNotEligible = nil
     local interface = awaitPath(player, {"PlayerGui", "Interface"})
     local equipment = awaitPath(interface, {"Equipment"})
     openEquipment(interface)
@@ -750,8 +754,10 @@ local function tryPrestige(player)
     local start = awaitPath(equipment, {"Prestige", "B_Prestige"})
     if not isVisible(start) then
         print("[AUTO PRESTIGE] 4.0: Gold ready, but Level/XP or next-rank eligibility not ready.")
+        env.AutoPrestigeNotEligible = true
         return
     end
+    env.AutoPrestigeNotEligible = nil
     local function waitUntil(callback, description, seconds)
         local deadline = os.clock() + (seconds or 30)
         repeat
@@ -1806,8 +1812,8 @@ local function startMissionFarm()
                     local watcher = env.AutoPrestigeRewardsWatcher
                     local gold = watcher and watcher.balance and watcher.balance()
                     local prestigeGold = timer and timer.prestigeGoldTarget
-                    if prestigeGold and type(gold) == "number" and gold >= prestigeGold then return end
-                    local isMaxGrade = plan and (plan.isMaxGrade or (plan.currentGrade and tostring(plan.currentGrade):upper():find("S")))
+                    if prestigeGold and not env.AutoPrestigeNotEligible and type(gold) == "number" and gold >= prestigeGold then return end
+                    local isMaxGrade = plan and (plan.isMaxGrade or (plan.potential and plan.potential >= 15) or (plan.currentGrade and tostring(plan.currentGrade):upper():find("S")))
                     if not isMaxGrade and plan and type(plan.goldTarget) == "number" and type(gold) == "number"
                         and gold >= plan.goldTarget then
                         -- Let the return monitor handle this reward instead of starting another round.
