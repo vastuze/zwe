@@ -11,7 +11,6 @@ if configEnv.WebhookURL == nil then configEnv.WebhookURL = "" end
 if configEnv.Height == nil then configEnv.Height = 400 end
 if configEnv.Speed == nil then configEnv.Speed = 350 end
 if configEnv.MaxDifficulty == nil then configEnv.MaxDifficulty = "Aberrant" end
-if configEnv.RequirePrestigeGold == nil then configEnv.RequirePrestigeGold = false end
 if configEnv.PrestigeSettings == nil then
     configEnv.PrestigeSettings = {
         P1 = {Gold = 200000000}, P2 = {Gold = 400000000}, P3 = {Gold = 600000000},
@@ -27,7 +26,6 @@ assert(type(configEnv.UseGoldBoost) == "boolean",
     "UseGoldBoost must be true or false WITHOUT quotes; received " .. type(configEnv.UseGoldBoost))
 assert(type(configEnv.PrestigeSettings) == "table", "PrestigeSettings must be a table.")
 assert(type(configEnv.MaxDifficulty) == "string", "MaxDifficulty must be a string.")
-assert(type(configEnv.RequirePrestigeGold) == "boolean", "RequirePrestigeGold must be boolean.")
 assert(type(configEnv.Modifiers) == "table", "Modifiers must be a list of names.")
 do
     local allowed = {"No Perks", "No Skills", "No Memories", "Nightmare", "Injury Prone",
@@ -73,10 +71,6 @@ local function configuredPrestigeGold(rank)
     return gold
 end
 for rank = 0, 4 do configuredPrestigeGold(rank) end
-local function requiredPrestigeLevel(rank)
-    if type(rank) ~= "number" or rank % 1 ~= 0 or rank < 0 or rank >= 5 then return nil end
-    return 100 + rank * 25
-end
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 -- Autoexec may run before the client and game UI have initialized.
@@ -177,29 +171,18 @@ local function startLobbyTimer()
     end
     if type(plan) ~= "table" or plan.userId ~= player.UserId or plan.gameId ~= game.GameId then plan = nil end
 
-    local currentRank = player:GetAttribute("Prestige")
-    if currentRank == nil then
-        local saved = env.AutoPrestigeRank
-        if type(saved) == "table" and type(saved.rank) == "number" then currentRank = saved.rank end
-    end
-    currentRank = currentRank or 0
-    local reqLevel = requiredPrestigeLevel(currentRank)
-    local canPrestigeRank = currentRank < 5 and reqLevel ~= nil
-
-    local prestigeGoldTarget = (configEnv.RequirePrestigeGold and prestigeTarget(player)) or nil
+    local prestigeGoldTarget = prestigeTarget(player)
     local isMaxGrade = plan and (plan.isMaxGrade or (plan.currentGrade and tostring(plan.currentGrade):upper():find("S")))
     local gradeGoldTarget = not isMaxGrade and plan and type(plan.goldTarget) == "number" and plan.goldTarget > 0 and plan.goldTarget or nil
 
-    -- Player is maxed if they cannot prestige (rank >= 5) AND cannot upgrade grade
-    local isMaxed = (not canPrestigeRank) and (gradeGoldTarget == nil)
+    -- Player is maxed if they cannot prestige (target == nil) AND cannot upgrade grade (target == nil)
+    local isMaxed = (prestigeGoldTarget == nil) and (gradeGoldTarget == nil)
 
     local timer = {
         jobId = game.JobId,
         placeId = game.PlaceId,
         gradePlan = plan,
         prestigeGoldTarget = prestigeGoldTarget,
-        currentRank = currentRank,
-        reqLevel = reqLevel,
         deadline = isMaxed and nil or (os.clock() + 600),
     }
     env.AutoPrestigeLobbyTimer = timer
@@ -207,9 +190,6 @@ local function startLobbyTimer()
 
     if isMaxed then
         print("[AUTO PRESTIGE] Max Prestige & Max Grade (S-) detected: Infinite Mission Farming active (no Lobby timer).")
-    elseif canPrestigeRank then
-        local curLvl = player:GetAttribute("Level") or 0
-        print("[AUTO PRESTIGE] In mission: Level " .. curLvl .. "/" .. tostring(reqLevel) .. " needed for Prestige " .. (currentRank + 1) .. ".")
     else
         print("[AUTO PRESTIGE] In mission: Lobby return target active (fallback: 600 seconds).")
     end
@@ -223,12 +203,9 @@ local function startLobbyTimer()
             local watcher = env.AutoPrestigeRewardsWatcher
             local gold = watcher and watcher.balance and watcher.balance()
 
-            local currentLevel = player:GetAttribute("Level") or 0
-            if timer.currentRank < 5 and timer.reqLevel and currentLevel >= timer.reqLevel then
-                if not configEnv.RequirePrestigeGold or (prestigeGoldTarget and type(gold) == "number" and gold >= prestigeGoldTarget) then
-                    timer.reason = "Level " .. currentLevel .. "/" .. timer.reqLevel .. " reached; ready to Prestige"
-                    break
-                end
+            if prestigeGoldTarget and type(gold) == "number" and gold >= prestigeGoldTarget then
+                timer.reason = "Prestige Gold target reached"
+                break
             end
             if gradeGoldTarget and type(gold) == "number" and gold >= gradeGoldTarget then
                 timer.reason = "Enough Gold for Grade " .. tostring(plan.targetGrade)
@@ -747,10 +724,7 @@ local function tryPrestige(player)
     local rank = readRank()
     assert(rank ~= nil, "4.0: Cannot identify Prestige rank; stopping before purchases/reset.")
     saveRank(rank)
-    if not ranks[rank + 1] or rank >= 5 then
-        print("[AUTO PRESTIGE] Max Prestige (Rank " .. tostring(rank) .. ") reached; skipping Prestige.")
-        return
-    end
+    if not ranks[rank + 1] then return end
     local topbar = require(ReplicatedStorage.Modules["User Interface"].Topbar)
     local gold
     for _, entry in pairs(topbar.Objects) do
@@ -764,16 +738,18 @@ local function tryPrestige(player)
         if text:match("^%d+$") then gold = tonumber(text) end
     end
     local target = configuredPrestigeGold(rank)
-    local currentLevel = player:GetAttribute("Level") or 0
-    local reqLevel = requiredPrestigeLevel(rank)
-    print("[AUTO PRESTIGE] 4.0: P" .. rank .. " | Level " .. currentLevel .. "/" .. tostring(reqLevel) .. " | Gold " .. tostring(gold) .. " | Target " .. tostring(target))
-    if configEnv.RequirePrestigeGold and target and target > 0 and (type(gold) ~= "number" or gold < target) then
-        print("[AUTO PRESTIGE] Prestige skipped: Gold below target (" .. tostring(gold) .. " < " .. target .. ").")
+    if target == nil then
+        print("[AUTO PRESTIGE] P1-P5 configuration complete; skipping further Prestige.")
+        return
+    end
+    print("[AUTO PRESTIGE] 4.0: P" .. rank .. " | Gold " .. tostring(gold) .. " | Target " .. target)
+    if target > 0 and (type(gold) ~= "number" or gold < target) then
+        print("[AUTO PRESTIGE] Prestige skipped: Gold below target or exact balance unavailable.")
         return
     end
     local start = awaitPath(equipment, {"Prestige", "B_Prestige"})
     if not isVisible(start) then
-        print("[AUTO PRESTIGE] 4.0: Level " .. currentLevel .. "/" .. tostring(reqLevel) .. ", but Prestige button not ready (need MAX LVL + 100% XP). Continuing to missions.")
+        print("[AUTO PRESTIGE] 4.0: Gold ready, but Level/XP or next-rank eligibility not ready.")
         return
     end
     local function waitUntil(callback, description, seconds)
@@ -1829,15 +1805,8 @@ local function startMissionFarm()
                     local plan = timer and timer.gradePlan
                     local watcher = env.AutoPrestigeRewardsWatcher
                     local gold = watcher and watcher.balance and watcher.balance()
-                    local currentRank = timer and timer.currentRank or (player:GetAttribute("Prestige") or 0)
-                    local reqLevel = timer and timer.reqLevel or requiredPrestigeLevel(currentRank)
-                    local currentLevel = player:GetAttribute("Level") or 0
-                    if currentRank < 5 and reqLevel and currentLevel >= reqLevel then
-                        if not configEnv.RequirePrestigeGold or (timer.prestigeGoldTarget and type(gold) == "number" and gold >= timer.prestigeGoldTarget) then
-                            -- Level reached and ready to prestige! Return to Lobby instead of retrying.
-                            return
-                        end
-                    end
+                    local prestigeGold = timer and timer.prestigeGoldTarget
+                    if prestigeGold and type(gold) == "number" and gold >= prestigeGold then return end
                     local isMaxGrade = plan and (plan.isMaxGrade or (plan.currentGrade and tostring(plan.currentGrade):upper():find("S")))
                     if not isMaxGrade and plan and type(plan.goldTarget) == "number" and type(gold) == "number"
                         and gold >= plan.goldTarget then
