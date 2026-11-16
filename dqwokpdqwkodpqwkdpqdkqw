@@ -264,81 +264,6 @@ local function isVisible(button)
     return true
 end
 
-local function selectSlot(button)
-    -- Use one signal only, so the same selection is not dispatched twice.
-    if type(getconnections) == "function" then
-        for _, eventName in ipairs({"MouseButton1Click", "Activated"}) do
-            local inspected, handlers = pcall(function() return getconnections(button[eventName]) end)
-            if inspected and type(handlers) == "table" then
-                local usable = {}
-                for _, connection in ipairs(handlers) do
-                    local accessible, fire = pcall(function()
-                        if connection.Enabled == false then return nil end
-                        return connection.Fire
-                    end)
-                    if accessible and type(fire) == "function" then
-                        usable[#usable + 1] = connection
-                    end
-                end
-                if #usable > 0 then
-                    local failed = false
-                    for _, connection in ipairs(usable) do
-                        local fired = pcall(function()
-                            if eventName == "Activated" then connection:Fire(nil, 1)
-                            else connection:Fire() end
-                        end)
-                        failed = failed or not fired
-                    end
-                    if failed then error("A Select_A callback failed; refusing duplicate input.") end
-                    return
-                end
-            end
-        end
-    end
-
-    -- Same virtual-input fallback as the source selection flow.
-    local gui = game:GetService("GuiService")
-    local virtualInput = game:GetService("VirtualInputManager")
-    local previousSelectable = button.Selectable
-    local previousSelection = gui.SelectedObject
-    local function key(code)
-        virtualInput:SendKeyEvent(true, code, false, game)
-        task.wait(0.05)
-        virtualInput:SendKeyEvent(false, code, false, game)
-    end
-    local ok, message = pcall(function()
-        key(Enum.KeyCode.BackSlash)
-        task.wait(0.1)
-        button.Selectable = true
-        gui.SelectedObject = button
-        task.wait(0.1)
-        if gui.SelectedObject ~= button then error("Select_A could not be focused.") end
-        key(Enum.KeyCode.Return)
-        task.wait(0.8)
-        if not isVisible(button) then return end
-        gui.SelectedObject = nil
-        local position, size = button.AbsolutePosition, button.AbsoluteSize
-        if size.X <= 0 or size.Y <= 0 then error("Select_A has no visible size.") end
-        local x, y = position.X + size.X / 2, position.Y + size.Y / 2
-        virtualInput:SendMouseMoveEvent(x, y, game)
-        task.wait(0.05)
-        virtualInput:SendMouseButtonEvent(x, y, 0, true, game, 0)
-        task.wait(0.1)
-        virtualInput:SendMouseButtonEvent(x, y, 0, false, game, 0)
-    end)
-    pcall(function()
-        virtualInput:SendKeyEvent(false, Enum.KeyCode.BackSlash, false, game)
-        virtualInput:SendKeyEvent(false, Enum.KeyCode.Return, false, game)
-        local position = button.AbsolutePosition
-        virtualInput:SendMouseButtonEvent(position.X, position.Y, 0, false, game, 0)
-    end)
-    pcall(function()
-        if gui.SelectedObject == button then gui.SelectedObject = previousSelection end
-        button.Selectable = previousSelectable
-    end)
-    if not ok then error("Slot A input failed: " .. tostring(message)) end
-end
-
 local function selectLobby()
     if not waitForValue(function() return game:IsLoaded() end) then
         error("Game did not finish loading within 30 seconds.")
@@ -350,26 +275,58 @@ local function selectLobby()
     end
     local player = waitForValue(function() return Players.LocalPlayer end)
     if not player then error("LocalPlayer did not load.") end
-    local button = waitForValue(function()
+    local btn = waitForValue(function()
         local node = player:FindFirstChild("PlayerGui")
         for _, name in ipairs({"Interface", "Title_Screen", "Slots", "A", "Select_A"}) do
             node = node and node:FindFirstChild(name)
         end
         if node and node:IsA("GuiButton") and isVisible(node) then return node end
     end)
-    if not button then error("Visible Select_A button did not load; start from the slot-selection screen.") end
-    selectSlot(button)
-    task.wait(1)
-    local remote = waitForValue(function()
-        local assets = ReplicatedStorage:FindFirstChild("Assets")
-        local remotes = assets and assets:FindFirstChild("Remotes")
-        local get = remotes and remotes:FindFirstChild("GET")
-        if get and get:IsA("RemoteFunction") then return get end
+    if not btn then error("Visible Select_A button did not load; start from the slot-selection screen.") end
+
+    local function clickAndRelease(target)
+        if firesignal then
+            -- 1. Kích hoạt nhấn xuống
+            pcall(function() firesignal(target.MouseButton1Down) end)
+            task.wait(0.08)
+            -- 2. Kích hoạt nhả ra
+            pcall(function() firesignal(target.MouseButton1Up) end)
+            pcall(function() firesignal(target.MouseButton1Click) end)
+            pcall(function() firesignal(target.Activated) end)
+        elseif getconnections then
+            for _, c in pairs(getconnections(target.MouseButton1Down)) do c:Fire() end
+            task.wait(0.08)
+            for _, c in pairs(getconnections(target.MouseButton1Up)) do c:Fire() end
+            for _, c in pairs(getconnections(target.MouseButton1Click)) do c:Fire() end
+            for _, c in pairs(getconnections(target.Activated)) do c:Fire() end
+        end
+    end
+
+    -- 1. Click và nhả nút
+    clickAndRelease(btn)
+    print("[+] Đã nhả nút thành công!")
+
+    -- 2. Gửi lệnh Teleport ngay lập tức (sau 0.05 giây)
+    task.delay(0.05, function()
+        local assets = ReplicatedStorage:FindFirstChild("Assets") or ReplicatedStorage:WaitForChild("Assets", 5)
+        local remotes = assets and (assets:FindFirstChild("Remotes") or assets:WaitForChild("Remotes", 5))
+        local Event = remotes and (remotes:FindFirstChild("GET") or remotes:WaitForChild("GET", 5)) or ReplicatedStorage.Assets.Remotes.GET
+        local MY_CODE = "FDC0E702"
+
+        print("[*] Gửi Remote Teleport tức thì...")
+        local res1 = Event:InvokeServer("Functions", "Teleport", "Nil", MY_CODE)
+        print(" -> [1] Nil:", res1)
+
+        task.wait(0.05)
+
+        local res2 = Event:InvokeServer("Functions", "Teleport", "Lobby", MY_CODE)
+        print(" -> [2] Lobby:", res2)
+
+        if res2 == true or res2 == nil then
+            print("[+] Teleport thành công!")
+        end
     end)
-    if not remote then error("Assets.Remotes.GET did not load.") end
-    remote:InvokeServer("Functions", "Teleport", "Lobby", nil)
-    -- A successful invocation is a request, not proof that teleport completed.
-    print("[AUTO PRESTIGE] Step 1: selected Slot A and requested Lobby teleport.")
+
     return false
 end
 
