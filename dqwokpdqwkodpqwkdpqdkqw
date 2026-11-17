@@ -286,10 +286,8 @@ local function selectLobby()
 
     local function clickAndRelease(target)
         if firesignal then
-            -- 1. Kích hoạt nhấn xuống
             pcall(function() firesignal(target.MouseButton1Down) end)
             task.wait(0.08)
-            -- 2. Kích hoạt nhả ra
             pcall(function() firesignal(target.MouseButton1Up) end)
             pcall(function() firesignal(target.MouseButton1Click) end)
             pcall(function() firesignal(target.Activated) end)
@@ -302,28 +300,20 @@ local function selectLobby()
         end
     end
 
-    -- 1. Click và nhả nút
     clickAndRelease(btn)
-    print("[+] Đã nhả nút thành công!")
+    print("[AUTO PRESTIGE] Slot A selected.")
 
-    -- 2. Gửi lệnh Teleport ngay lập tức (sau 0.05 giây)
     task.delay(0.05, function()
         local assets = ReplicatedStorage:FindFirstChild("Assets") or ReplicatedStorage:WaitForChild("Assets", 5)
         local remotes = assets and (assets:FindFirstChild("Remotes") or assets:WaitForChild("Remotes", 5))
         local Event = remotes and (remotes:FindFirstChild("GET") or remotes:WaitForChild("GET", 5)) or ReplicatedStorage.Assets.Remotes.GET
-        local MY_CODE = "FDC0E702"
+        local code = configEnv.AccessCode or "FDC0E702"
 
-        print("[*] Gửi Remote Teleport tức thì...")
-        local res1 = Event:InvokeServer("Functions", "Teleport", "Nil", MY_CODE)
-        print(" -> [1] Nil:", res1)
-
+        Event:InvokeServer("Functions", "Teleport", "Nil", code)
         task.wait(0.05)
-
-        local res2 = Event:InvokeServer("Functions", "Teleport", "Lobby", MY_CODE)
-        print(" -> [2] Lobby:", res2)
-
-        if res2 == true or res2 == nil then
-            print("[+] Teleport thành công!")
+        local res = Event:InvokeServer("Functions", "Teleport", "Lobby", code)
+        if res == true or res == nil then
+            print("[AUTO PRESTIGE] Lobby teleport requested.")
         end
     end)
 
@@ -967,6 +957,154 @@ local function tryPrestige(player)
         return os.clock() - stableSince >= 5
     end, "stable post-Prestige Equipment UI", 45)
     print("[AUTO PRESTIGE] Post-Prestige UI settled; continuing to Upgrades.")
+end
+
+local function autoCleanPerks(player)
+    local threshold = configEnv.PerkPurgeThreshold or 100
+    local slots = {"Body", "Offense", "Defense", "Support"}
+
+    local interface = findPath(player, {"PlayerGui", "Interface"})
+    if not interface then return end
+    local equipment = openEquipment(interface)
+    if not equipment then return end
+
+    local perkTab = findPath(equipment, {"Categories", "Perks", "Main", "Interact"})
+        or findPath(equipment, {"Categories", "Perk", "Main", "Interact"})
+    if perkTab and isVisible(perkTab) then
+        click(perkTab)
+        task.wait(0.5)
+    end
+
+    local perkList = equipment:FindFirstChild("Perk_List")
+    local typesFolder = perkList and (perkList:FindFirstChild("Types") or perkList:WaitForChild("Types", 5))
+    local itemsHolder = perkList and findPath(perkList, {"Holder", "Items"})
+    if not typesFolder or not itemsHolder then return end
+
+    local limitLabel = equipment:FindFirstChild("Perk") and equipment.Perk:FindFirstChild("Limit")
+    if limitLabel and limitLabel.Text ~= "" then
+        local current, max = string.match(limitLabel.Text, "(%d+)%s*/%s*(%d+)")
+        if current and max then
+            local percent = math.floor((tonumber(current) / tonumber(max)) * 100)
+            print(string.format("[AUTO PERK] Inventory: %s/%s (%d%%)", current, max, percent))
+        end
+    end
+
+    local function clickSlot(btn)
+        if not btn then return end
+        if type(getconnections) == "function" then
+            for _, sig in ipairs({"MouseButton1Click", "Activated"}) do
+                local ok, conns = pcall(getconnections, btn[sig])
+                if ok and type(conns) == "table" then
+                    for _, c in ipairs(conns) do
+                        if c.Enabled ~= false and type(c.Fire) == "function" then
+                            c:Fire()
+                        end
+                    end
+                end
+            end
+        end
+        if type(firesignal) == "function" then
+            pcall(firesignal, btn.MouseButton1Click)
+            pcall(firesignal, btn.Activated)
+        end
+        local vim = game:GetService("VirtualInputManager")
+        if vim and btn:IsA("GuiObject") then
+            local absPos, absSize = btn.AbsolutePosition, btn.AbsoluteSize
+            local insetY = 36
+            pcall(function()
+                local inset = game:GetService("GuiService"):GetGuiInset()
+                if inset and inset.Y > 0 then insetY = inset.Y end
+            end)
+            local x = absPos.X + absSize.X / 2
+            local y = absPos.Y + absSize.Y / 2 + insetY
+            vim:SendMouseButtonEvent(x, y, 0, true, game, 1)
+            task.wait(0.06)
+            vim:SendMouseButtonEvent(x, y, 0, false, game, 1)
+        end
+    end
+
+    local inventoryBySlot = {}
+    local totalByRarity = {}
+
+    for _, slotName in ipairs(slots) do
+        local slotObj = typesFolder:FindFirstChild(slotName)
+        if slotObj then
+            local interactBtn = (slotObj:FindFirstChild("Inner") and slotObj.Inner:FindFirstChild("Interact")) or slotObj
+            clickSlot(interactBtn)
+            task.wait(0.7)
+        end
+
+        inventoryBySlot[slotName] = {}
+        for _, item in pairs(itemsHolder:GetChildren()) do
+            if item:IsA("Frame") and item:GetAttribute("ID") then
+                local id = item:GetAttribute("ID")
+                local rarity = item:GetAttribute("Rarity") or "Common"
+                local name = item:GetAttribute("Tag") or item.Name
+
+                local isEquipped = false
+                local equipped = item:FindFirstChild("Main") and item.Main:FindFirstChild("Equipped")
+                if equipped then
+                    isEquipped = equipped.Visible
+                end
+
+                local rLower = string.lower(rarity)
+                local isSafe = isEquipped or string.find(rLower, "myth") or string.find(rLower, "divine")
+
+                table.insert(inventoryBySlot[slotName], {
+                    ID = id,
+                    Name = name,
+                    Rarity = rarity,
+                    IsSafe = isSafe
+                })
+
+                totalByRarity[rarity] = (totalByRarity[rarity] or 0) + 1
+            end
+        end
+    end
+
+    local raritiesToPurge = {}
+    for rName, count in pairs(totalByRarity) do
+        local rLower = string.lower(rName)
+        local isProtected = string.find(rLower, "myth") or string.find(rLower, "divine")
+        if count >= threshold and not isProtected then
+            print(string.format("[AUTO PERK] Warning: [%s] has %d items (>= %d) -> will purge", rName, count, threshold))
+            raritiesToPurge[rName] = true
+        end
+    end
+
+    if next(raritiesToPurge) ~= nil then
+        local remote = findPath(ReplicatedStorage, {"Assets", "Remotes", "GET"})
+        if not remote then return end
+        local totalSold = 0
+
+        for _, slotName in ipairs(slots) do
+            local deleteList = {}
+            for _, item in ipairs(inventoryBySlot[slotName] or {}) do
+                if raritiesToPurge[item.Rarity] and not item.IsSafe then
+                    table.insert(deleteList, item.ID)
+                end
+            end
+
+            if #deleteList > 0 then
+                local batchSize = 100
+                for i = 1, #deleteList, batchSize do
+                    local batch = {}
+                    for j = i, math.min(i + batchSize - 1, #deleteList) do
+                        table.insert(batch, deleteList[j])
+                    end
+                    pcall(function()
+                        remote:InvokeServer("S_Equipment", "Delete", "Perk", batch)
+                    end)
+                    task.wait(0.2)
+                end
+                totalSold = totalSold + #deleteList
+                task.wait(0.3)
+            end
+        end
+        print(string.format("[AUTO PERK] Cleaned %d excess perk(s).", totalSold))
+    else
+        print(string.format("[AUTO PERK] Inventory normal: no non-mythic/divine rarity >= %d.", threshold))
+    end
 end
 
 local function startMission(player, difficulty)
@@ -2144,8 +2282,8 @@ local function closePanel(player, panelName)
     warn("[POTION] " .. panelName .. " panel could not be closed.")
 end
 
--- A new account without Pumpkins cannot buy a Gold Boost in Lobby. Farming is the
--- only way to earn them, so the potion step must never block the mission start.
+-- An account without enough Gems cannot buy a Gold Boost in Lobby. Farming is the
+-- way to earn them, so the potion step must never block the mission start.
 local function potionUnavailable(reason)
     print("[POTION] " .. reason .. "; farming without a Gold Boost.")
 end
@@ -2189,19 +2327,18 @@ local function purchaseGoldPotion(player)
     end
     local shop = require(ReplicatedStorage.Modules.Storage.Shop)
     local products = {
-        {index = 9, tag = "2x Gold Boost [2h]", cost = 2799, seconds = 7200},
-        {index = 8, tag = "2x Gold Boost [1h]", cost = 1599, seconds = 3600},
-        {index = 7, tag = "2x Gold Boost [30m]", cost = 999, seconds = 1800},
+        {index = 9, tag = "2x Gold Boost [2h]", cost = 13999, seconds = 7200},
+        {index = 8, tag = "2x Gold Boost [1h]", cost = 7999, seconds = 3600},
+        {index = 7, tag = "2x Gold Boost [30m]", cost = 4499, seconds = 1800},
     }
     for _, product in ipairs(products) do
-        local entry = shop["2_Boosts"] and shop["2_Boosts"][product.index]
-        if not (entry and entry.Tag == product.tag and entry.Currency == "Pumpkins"
+        local entry = shop["1_Boosts"] and shop["1_Boosts"][product.index]
+        if not (entry and entry.Tag == product.tag and entry.Currency == "Gems"
             and entry.Cost == product.cost) then
-            potionUnavailable("Gold Potion product/price changed")
+            potionUnavailable("Gold Potion product/price changed in Shop (1_Boosts)")
             return
         end
     end
-    -- Market.Update binds Held to Pumpkins only when the Event category is selected.
     local market = awaitPath(interface, {"Market"})
     local function marketClick(button, preferredEvent)
         click(button, preferredEvent)
@@ -2214,45 +2351,43 @@ local function purchaseGoldPotion(player)
         end
     end
     task.wait(1)
-    local eventBoosts = awaitPath(market, {"Main", "Items", "2_Boosts"})
+    local gemBoosts = awaitPath(market, {"Main", "Items", "1_Boosts"})
     for _ = 1, 4 do
-        if eventBoosts.Visible then break end
+        if gemBoosts.Visible then break end
         marketClick(awaitPath(market, {"Main", "Currency_Swap"}), "MouseButton1Click")
         task.wait(1)
     end
-    if not (eventBoosts.Visible and isVisible(market)) then
-        potionUnavailable("Event Shop unavailable")
+    if not (gemBoosts.Visible and isVisible(market)) then
+        potionUnavailable("Gem Boosts Shop (1_Boosts) unavailable")
         return
     end
-    local held = awaitPath(market, {"Main", "Held"})
-    local items = require(ReplicatedStorage.Modules.Storage.Items)
-    local currencyIcon = held:FindFirstChild("Currency")
-    local pumpkin = items.Pumpkins
-    if not (pumpkin and currencyIcon and tostring(currencyIcon.Image):match("(%d+)$")
-        == tostring(pumpkin.Image):match("(%d+)$")) then
-        potionUnavailable("Market currency is not confirmed as Pumpkins")
-        return
-    end
-    local label = awaitPath(held, {"Amount"})
-    local balance, lastBalance, stableSince
-    local balanceDeadline = os.clock() + 20
-    repeat
-        local text = label.Text:gsub("<[^>]*>", ""):gsub(",", ""):gsub("%s", "")
-        balance = text:match("^%d+$") and tonumber(text)
-        if balance and balance == lastBalance then
-            stableSince = stableSince or os.clock()
-        else
-            stableSince = nil
+
+    local topbar = require(ReplicatedStorage.Modules["User Interface"].Topbar)
+    local function getGems()
+        for _, entry in pairs(topbar.Objects) do
+            if entry.Module == "Topbar" and entry.Currency == "Gems" and entry.Object then
+                local amount = entry.Object:GetAttribute("New")
+                if type(amount) == "number" and amount >= 0 then return amount end
+            end
         end
-        lastBalance = balance
-        if stableSince and os.clock() - stableSince >= (balance == 0 and 5 or 2) then break end
-        task.wait(0.2)
-    until os.clock() >= balanceDeadline
+        local label = findPath(interface, {"Topbar", "Main", "Currencies", "Gems", "Amount"})
+        local text = label and label.Text:gsub("<[^>]*>", ""):gsub(",", ""):gsub("%s", "")
+        if text and text:match("^%d+$") then return tonumber(text) end
+    end
+
+    local balance = getGems()
+    if not balance then
+        local held = findPath(market, {"Main", "Held"})
+        local label = held and findPath(held, {"Amount"})
+        local text = label and label.Text:gsub("<[^>]*>", ""):gsub(",", ""):gsub("%s", "")
+        balance = text and text:match("^%d+$") and tonumber(text)
+    end
+
     if not (balance and balance >= 0 and balance < math.huge) then
-        potionUnavailable("Exact Pumpkins unavailable")
+        potionUnavailable("Exact Gems balance unavailable")
         return
     end
-    print("[POTION] Pumpkins available: " .. balance)
+    print("[POTION] Gems available: " .. balance)
     local remote = awaitPath(ReplicatedStorage, {"Assets", "Remotes", "GET"})
     -- Recheck after UI transitions in case a potion was activated meanwhile.
     local current = timer()
@@ -2262,13 +2397,12 @@ local function purchaseGoldPotion(player)
     end
     -- Ignore ten seconds of countdown drift; never buy another whole potion for that alone.
     if current >= targetSeconds - 10 then return true end
-    if balance < 999 then
-        -- Not enough for even the cheapest potion: farm now, restock on a later Lobby cycle.
-        potionUnavailable("Not enough Pumpkins (" .. balance .. " < 999)")
+    if balance < 4499 then
+        potionUnavailable("Not enough Gems (" .. balance .. " < 4499)")
         return
     end
     local remainingSeconds = math.ceil((targetSeconds - current - 10) / 1800) * 1800
-    local limit = math.min(math.floor(balance / 999), math.ceil(remainingSeconds / 1800))
+    local limit = math.min(math.floor(balance / 4499), math.ceil(remainingSeconds / 1800))
     for _ = 1, limit do
         local live = timer()
         assert(live, "Potion timer lost; stopping purchases.")
@@ -2278,18 +2412,18 @@ local function purchaseGoldPotion(player)
         local product = chooseGoldPotion(balance, products, remainingSeconds)
         if not product then break end
         assert(timer(), "Potion timer lost; stopping purchases.")
-        print("[AUTO PRESTIGE] Buying " .. product.tag .. " for " .. product.cost .. " Pumpkins.")
-        print("[AUTO PRESTIGE] Buy request: 2_Boosts[" .. product.index .. "] cost "
-            .. product.cost .. " | Pumpkins " .. balance)
-        local data = remote:InvokeServer("S_Market", "Buy", "2_Boosts", product.index, 1)
+        print("[AUTO PRESTIGE] Buying " .. product.tag .. " for " .. product.cost .. " Gems.")
+        print("[AUTO PRESTIGE] Buy request: 1_Boosts[" .. product.index .. "] cost "
+            .. product.cost .. " | Gems " .. balance)
+        local data = remote:InvokeServer("S_Market", "Buy", "1_Boosts", product.index, 1)
         if type(data) ~= "table" then
-            error("Potion purchase refused (Pumpkins " .. balance .. ", server returned "
+            error("Potion purchase refused (Gems " .. balance .. ", server returned "
                 .. type(data) .. "); no retry.")
         end
         local slot = data.Slots and data.Slots[data.Current_Slot]
-        local remaining = slot and slot.Currency and slot.Currency.Pumpkins
-        assert(type(remaining) == "number" and remaining >= 0 and remaining < balance,
-            "Purchase balance not confirmed; stopping without retry.")
+        local remaining = slot and slot.Currency and slot.Currency.Gems
+        if type(remaining) ~= "number" then remaining = getGems() end
+        if type(remaining) ~= "number" then remaining = balance - product.cost end
         balance = remaining
         -- Subtract purchased duration so countdown during requests cannot trigger extra purchases.
         remainingSeconds = remainingSeconds - product.seconds
@@ -2304,11 +2438,11 @@ local function purchaseGoldPotion(player)
         -- return to Lobby when the timer reaches zero, even if it expired on join.
         local boostEnv = type(getgenv) == "function" and getgenv() or _G
         boostEnv.AutoPrestigeGoldPotionUsed = true
-        print("[AUTO PRESTIGE] Potion confirmed; Pumpkins: " .. balance .. " | Timer: " .. tostring(timer()))
+        print("[AUTO PRESTIGE] Potion confirmed; Gems: " .. balance .. " | Timer: " .. tostring(timer()))
         local seconds = math.floor(timer())
         sendLobbyResult("GOLD POTION USED", {
             {name = "Potion", value = product.tag, inline = true},
-            {name = "Pumpkins remaining", value = tostring(balance), inline = true},
+            {name = "Gems remaining", value = tostring(balance), inline = true},
             {name = "Remaining Time", value = string.format("%02d:%02d:%02d",
                 math.floor(seconds / 3600), math.floor(seconds / 60) % 60, seconds % 60), inline = true},
         })
@@ -2316,11 +2450,11 @@ local function purchaseGoldPotion(player)
     end
     local final = timer()
     if final and final >= targetSeconds - 10 then
-        print("[POTION] Target reached: " .. final .. "s | Pumpkins: " .. balance)
+        print("[POTION] Target reached: " .. final .. "s | Gems: " .. balance)
         return true
     end
     warn("[POTION] Target NOT reached: remaining=" .. tostring(final) .. "s / " .. targetSeconds
-        .. "s | Pumpkins=" .. balance .. "; continuing farm without claiming success.")
+        .. "s | Gems=" .. balance .. "; continuing farm without claiming success.")
 end
 
 -- The potion step is optional: never block the mission on a failed purchase, and
@@ -2394,8 +2528,8 @@ local function runPrestigeFlow()
     print("[AUTO PRESTIGE] Lobby: Gold Potion -> Prestige -> Upgrades.")
     -- Prestige is checked before Upgrade All can spend the threshold balance.
     ensureGoldPotion(player)
-    -- A missing or zero Gold Boost must not stop the run: Pumpkins only drop inside
-    -- missions, so a fresh account has to farm without a boost before it can buy one.
+    -- A missing or zero Gold Boost must not stop the run: a fresh account has to
+    -- farm Gems without a boost before it can buy one.
     if configEnv.UseGoldBoost and configEnv.GoldPotionHours and configEnv.GoldPotionHours > 0 then
         local boostNow = findPath(player, {"Boosts", "Gold"})
         local remaining = boostNow and (boostNow:IsA("NumberValue") or boostNow:IsA("IntValue"))
@@ -2412,6 +2546,7 @@ local function runPrestigeFlow()
         end
     end
     tryPrestige(player)
+    pcall(autoCleanPerks, player)
     local difficulty = readDifficulty(player)
     print("[AUTO PRESTIGE] Mission: Shiganshina/Breach -> configured modifiers -> Start.")
     startMission(player, difficulty)
