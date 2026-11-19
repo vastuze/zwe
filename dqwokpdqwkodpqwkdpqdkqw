@@ -328,7 +328,7 @@ end
 local function click(button, preferredEvent, stillNeeded)
     assert(button:IsA("GuiButton"), "Not a UI button: " .. button:GetFullName())
 
-    -- 1. Try getconnections (firing active handlers)
+    -- 1. Try getconnections (firing active handlers directly without mouse)
     if type(getconnections) == "function" then
         for _, eventName in ipairs({"Activated", "MouseButton1Click", "MouseButton1Down"}) do
             local ok, handlers = pcall(function() return getconnections(button[eventName]) end)
@@ -342,31 +342,13 @@ local function click(button, preferredEvent, stillNeeded)
         end
     end
 
-    -- 2. Try firesignal full sequence
+    -- 2. Try firesignal full sequence directly on the instance (no cursor movement)
     if type(firesignal) == "function" then
         pcall(function() firesignal(button.MouseButton1Down) end)
-        task.wait(0.03)
+        task.wait(0.02)
         pcall(function() firesignal(button.MouseButton1Up) end)
         pcall(function() firesignal(button.MouseButton1Click) end)
         pcall(function() firesignal(button.Activated) end)
-    end
-
-    -- 3. VirtualInputManager at exact element center (screen coords without offset)
-    if stillNeeded and not stillNeeded() then return end
-    local vim = game:GetService("VirtualInputManager")
-    if vim and button:IsA("GuiObject") and button.Parent and isVisible(button) then
-        local size, position = button.AbsoluteSize, button.AbsolutePosition
-        if size.X > 0 and size.Y > 0 then
-            local x = position.X + size.X / 2
-            local y = position.Y + size.Y / 2
-            pcall(function()
-                vim:SendMouseMoveEvent(x, y, game)
-                task.wait(0.04)
-                vim:SendMouseButtonEvent(x, y, 0, true, game, 0)
-                task.wait(0.08)
-                vim:SendMouseButtonEvent(x, y, 0, false, game, 0)
-            end)
-        end
     end
 end
 
@@ -392,59 +374,82 @@ local function openEquipment(interface)
 end
 
 local function upgradeAll(player, interface, equipment, values)
-    local topbar = require(ReplicatedStorage.Modules["User Interface"].Topbar)
-    local function currency(name)
-        -- Topbar keeps the exact balance in New while the display animates.
-        for _, entry in pairs(topbar.Objects) do
-            if entry.Module == "Topbar" and entry.Currency == name and entry.Object then
-                local amount = entry.Object:GetAttribute("New")
-                if type(amount) == "number" and amount >= 0 then return amount end
+    local Event = ReplicatedStorage:WaitForChild("Assets")
+                                   :WaitForChild("Remotes")
+                                   :WaitForChild("GET")
+
+    local statsList = {
+        "Blade_Durability",
+        "ODM_Gas",
+        "ODM_Range",
+        "ODM_Control",
+        "ODM_Speed",
+        "Crit_Damage",
+        "Crit_Chance",
+        "ODM_Damage"
+    }
+
+    print("[AUTO PRESTIGE] Upgrading equipment 100% via Remote (no click)...")
+
+    local totalUpgrades = 0
+    local lastData = nil
+
+    -- Lặp lại gọi Remote cho đến khi nâng hết số vàng có thể nâng (tối đa 120 lần để chống lặp vô hạn)
+    for i = 1, 120 do
+        local ok, data = pcall(function()
+            return Event:InvokeServer("S_Equipment", "Upgrade", statsList)
+        end)
+        
+        -- Nếu server trả về nil nghĩa là không đủ vàng hoặc lỗi
+        if not ok or data == nil or type(data) ~= "table" then
+            break
+        end
+        
+        lastData = data
+        totalUpgrades = totalUpgrades + 1
+        task.wait(0.1) -- Giãn cách 0.1s giữa các lần nâng
+    end
+
+    if totalUpgrades > 0 then
+        print(string.format("[AUTO PRESTIGE] Completed %d upgrade rounds via Remote!", totalUpgrades))
+    else
+        print("[AUTO PRESTIGE] No upgrades purchased (maxed or insufficient Gold).")
+    end
+
+    -- Cập nhật lại giao diện Topbar & Title trên màn hình của game
+    if lastData then
+        pcall(function()
+            -- 1. Refresh Topbar (cập nhật số vàng hiển thị trên màn hình)
+            local TopbarModule = ReplicatedStorage:FindFirstChild("Modules") 
+                and ReplicatedStorage.Modules:FindFirstChild("User Interface")
+                and ReplicatedStorage.Modules["User Interface"]:FindFirstChild("Topbar")
+            if TopbarModule then
+                local Topbar = require(TopbarModule)
+                if Topbar and Topbar.Refresh then
+                    Topbar.Refresh(player, lastData)
+                end
             end
-        end
-        local label = findPath(interface, {"Topbar", "Main", "Currencies", name, "Amount"})
-        local text = label and label.Text:gsub("<[^>]*>", ""):gsub(",", ""):gsub("%s", "")
-        -- Do not treat abbreviated amounts such as 1.2M as an exact balance.
-        if text and text:match("^%d+$") then return tonumber(text) end
+            
+            -- 2. Cập nhật Title Grade trên giao diện Equipment
+            local SharedModule = ReplicatedStorage:FindFirstChild("Modules")
+                and ReplicatedStorage.Modules:FindFirstChild("Shared")
+                and ReplicatedStorage.Modules.Shared:FindFirstChild("Shared")
+            if SharedModule then
+                local Shared = require(SharedModule)
+                local newPotential = Shared.Get_Potential(nil, player, lastData)
+                if newPotential and values.Pot_Tags[newPotential] then
+                    local gradeTag = values.Pot_Tags[newPotential]
+                    print(string.format("[AUTO PRESTIGE] Current Grade after upgrade: [%s GRADE]", gradeTag))
+                    
+                    local title = findPath(equipment, {"Categories", "Upgrades", "Main", "Title"})
+                    if title then
+                        title.Text = "UPGRADES [" .. gradeTag .. " GRADE]"
+                    end
+                end
+            end
+        end)
     end
-    local gold, gems = currency("Gold"), currency("Gems")
-    print("[AUTO PRESTIGE] Gold: " .. tostring(gold) .. " | Gems: " .. tostring(gems))
-    local statsFrame = findPath(equipment, {"Stats"})
-    local blades = findPath(equipment, {"Stats", "Blades"})
-    local spears = findPath(equipment, {"Stats", "Spears"})
-    local weaponActive = (blades and isVisible(blades)) or (spears and isVisible(spears)) or (statsFrame and isVisible(statsFrame))
-    if not weaponActive then
-        print("[AUTO PRESTIGE] Weapon stats upgrades not active; continuing step 2.")
-        return
-    end
-    -- Let the game's Upgrade All handler decide which upgrades are affordable.
-    -- Stop if Gold does not decrease; never keep clicking a refused purchase.
-    for _ = 1, 120 do
-        gold = currency("Gold")
-        if not gold or gold <= 0 then
-            print("[AUTO PRESTIGE] No available Gold balance; continuing step 2.")
-            return
-        end
-        local all = findPath(equipment, {"Stats", "All"})
-        if not all or not isVisible(all) then
-            print("[AUTO PRESTIGE] Upgrade All unavailable; continuing step 2.")
-            return
-        end
-        local previousGold = gold
-        print("[AUTO PRESTIGE] Clicking Upgrade All. Gold: " .. gold)
-        click(all:IsA("GuiButton") and all or awaitPath(all, {"Interact"}))
-        task.wait(1)
-        local deadline = os.clock() + 8
-        repeat
-            gold = currency("Gold")
-            if gold and gold < previousGold then break end
-            task.wait(0.25)
-        until os.clock() >= deadline
-        if not gold or gold >= previousGold then
-            print("[AUTO PRESTIGE] Gold did not decrease (insufficient Gold or no upgrade); continuing step 2.")
-            return
-        end
-        print("[AUTO PRESTIGE] Gold remaining: " .. gold .. " | Gems: " .. tostring(currency("Gems")))
-    end
+    print("[AUTO PRESTIGE] Equipment upgrade via Remote finished.")
 end
 
 local function saveNextGradePlan(player, equipment, values, potential, currentGrade)
