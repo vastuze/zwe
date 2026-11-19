@@ -327,67 +327,47 @@ end
 
 local function click(button, preferredEvent, stillNeeded)
     assert(button:IsA("GuiButton"), "Not a UI button: " .. button:GetFullName())
-    -- Instances can replicate before Effects.Hover installs their click callbacks.
-    -- A preferred event keeps one-shot confirmations from firing both click signals.
-    local events = preferredEvent and {preferredEvent} or {"MouseButton1Click", "Activated"}
-    local deadline = os.clock() + 5
-    repeat
-        if stillNeeded and not stillNeeded() then return end
-        if type(getconnections) == "function" then
-            for _, eventName in ipairs(events) do
-                local ok, handlers = pcall(function() return getconnections(button[eventName]) end)
-                local usable = {}
-                if ok and type(handlers) == "table" then
-                    for _, connection in pairs(handlers) do
-                        local accessible, fire = pcall(function()
-                            if connection.Enabled == false then return nil end
-                            return connection.Fire
-                        end)
-                        if accessible and type(fire) == "function" then usable[#usable + 1] = connection end
+
+    -- 1. Try getconnections (firing active handlers)
+    if type(getconnections) == "function" then
+        for _, eventName in ipairs({"Activated", "MouseButton1Click", "MouseButton1Down"}) do
+            local ok, handlers = pcall(function() return getconnections(button[eventName]) end)
+            if ok and type(handlers) == "table" and #handlers > 0 then
+                for _, connection in pairs(handlers) do
+                    if connection.Enabled ~= false and type(connection.Fire) == "function" then
+                        pcall(function() connection:Fire() end)
                     end
-                end
-                if #usable > 0 then
-                    if stillNeeded and not stillNeeded() then return end
-                    -- Do not fall back after dispatch: that could buy upgrades twice.
-                    for _, connection in ipairs(usable) do
-                        if eventName == "Activated" then connection:Fire(nil, 1)
-                        else connection:Fire() end
-                    end
-                    return
                 end
             end
         end
-        task.wait(0.2)
-    until not button.Parent or os.clock() >= deadline
-
-    if stillNeeded and not stillNeeded() then return end
-    assert(button.Parent and isVisible(button), "Button unavailable for virtual input: " .. button:GetFullName())
-    local size, position = button.AbsoluteSize, button.AbsolutePosition
-    assert(size.X > 0 and size.Y > 0, "Button has no clickable size: " .. button.Name)
-    local input = game:GetService("VirtualInputManager")
-    local x, y = position.X + size.X / 2, position.Y + size.Y / 2
-    print("[AUTO PRESTIGE] Using virtual click: " .. button:GetFullName())
-    input:SendMouseMoveEvent(x, y, game)
-    task.wait(0.05)
-    if stillNeeded and not stillNeeded() then return end
-    local pressed = false
-    local ok, message = pcall(function()
-        input:SendMouseButtonEvent(x, y, 0, true, game, 0)
-        pressed = true
-        task.wait(0.1)
-        input:SendMouseButtonEvent(x, y, 0, false, game, 0)
-        pressed = false
-    end)
-    if pressed then
-        pcall(function()
-            input:SendMouseButtonEvent(x, y, 0, false, game, 0)
-        end)
     end
-    -- Always emit a final mouse-up so a failed virtual click cannot leave it held.
-    pcall(function()
-        input:SendMouseButtonEvent(x, y, 0, false, game, 0)
-    end)
-    if not ok then error(message) end
+
+    -- 2. Try firesignal full sequence
+    if type(firesignal) == "function" then
+        pcall(function() firesignal(button.MouseButton1Down) end)
+        task.wait(0.03)
+        pcall(function() firesignal(button.MouseButton1Up) end)
+        pcall(function() firesignal(button.MouseButton1Click) end)
+        pcall(function() firesignal(button.Activated) end)
+    end
+
+    -- 3. VirtualInputManager at exact element center (screen coords without offset)
+    if stillNeeded and not stillNeeded() then return end
+    local vim = game:GetService("VirtualInputManager")
+    if vim and button:IsA("GuiObject") and button.Parent and isVisible(button) then
+        local size, position = button.AbsoluteSize, button.AbsolutePosition
+        if size.X > 0 and size.Y > 0 then
+            local x = position.X + size.X / 2
+            local y = position.Y + size.Y / 2
+            pcall(function()
+                vim:SendMouseMoveEvent(x, y, game)
+                task.wait(0.04)
+                vim:SendMouseButtonEvent(x, y, 0, true, game, 0)
+                task.wait(0.08)
+                vim:SendMouseButtonEvent(x, y, 0, false, game, 0)
+            end)
+        end
+    end
 end
 
 local function openEquipment(interface)
@@ -428,9 +408,12 @@ local function upgradeAll(player, interface, equipment, values)
     end
     local gold, gems = currency("Gold"), currency("Gems")
     print("[AUTO PRESTIGE] Gold: " .. tostring(gold) .. " | Gems: " .. tostring(gems))
+    local statsFrame = findPath(equipment, {"Stats"})
     local blades = findPath(equipment, {"Stats", "Blades"})
-    if not blades or not isVisible(blades) then
-        print("[AUTO PRESTIGE] Blades upgrades not active; continuing step 2.")
+    local spears = findPath(equipment, {"Stats", "Spears"})
+    local weaponActive = (blades and isVisible(blades)) or (spears and isVisible(spears)) or (statsFrame and isVisible(statsFrame))
+    if not weaponActive then
+        print("[AUTO PRESTIGE] Weapon stats upgrades not active; continuing step 2.")
         return
     end
     -- Let the game's Upgrade All handler decide which upgrades are affordable.
@@ -976,40 +959,6 @@ local function autoCleanPerks(player)
         end
     end
 
-    local function clickSlot(btn)
-        if not btn then return end
-        if type(getconnections) == "function" then
-            for _, sig in ipairs({"MouseButton1Click", "Activated"}) do
-                local ok, conns = pcall(getconnections, btn[sig])
-                if ok and type(conns) == "table" then
-                    for _, c in ipairs(conns) do
-                        if c.Enabled ~= false and type(c.Fire) == "function" then
-                            c:Fire()
-                        end
-                    end
-                end
-            end
-        end
-        if type(firesignal) == "function" then
-            pcall(firesignal, btn.MouseButton1Click)
-            pcall(firesignal, btn.Activated)
-        end
-        local vim = game:GetService("VirtualInputManager")
-        if vim and btn:IsA("GuiObject") then
-            local absPos, absSize = btn.AbsolutePosition, btn.AbsoluteSize
-            local insetY = 36
-            pcall(function()
-                local inset = game:GetService("GuiService"):GetGuiInset()
-                if inset and inset.Y > 0 then insetY = inset.Y end
-            end)
-            local x = absPos.X + absSize.X / 2
-            local y = absPos.Y + absSize.Y / 2 + insetY
-            vim:SendMouseButtonEvent(x, y, 0, true, game, 1)
-            task.wait(0.06)
-            vim:SendMouseButtonEvent(x, y, 0, false, game, 1)
-        end
-    end
-
     local inventoryBySlot = {}
     local totalByRarity = {}
 
@@ -1017,7 +966,7 @@ local function autoCleanPerks(player)
         local slotObj = typesFolder:FindFirstChild(slotName)
         if slotObj then
             local interactBtn = (slotObj:FindFirstChild("Inner") and slotObj.Inner:FindFirstChild("Interact")) or slotObj
-            clickSlot(interactBtn)
+            click(interactBtn)
             task.wait(0.7)
         end
 
