@@ -504,42 +504,10 @@ end
 local function readDifficulty(player)
     local gui = awaitPath(player, {"PlayerGui"})
     local interface = awaitPath(gui, {"Interface"})
-    local equipment = awaitPath(interface, {"Equipment"})
-    local equipmentButton = awaitPath(interface, {"Topbar", "Main", "Categories", "Equipment", "Interact"})
-    -- IsLoaded only covers Roblox loading, not the game's delayed UI setup.
-    print("[AUTO PRESTIGE] Waiting for Lobby Equipment UI initialization...")
-    local handlerDeadline = os.clock() + 10
-    while not isVisible(equipment) and type(getconnections) == "function" do
-        if os.clock() >= handlerDeadline then
-            warn("[AUTO PRESTIGE] Equipment handlers unavailable after 10 seconds; trying normal click fallback.")
-            break
-        end
-        local ready = false
-        for _, signal in ipairs({"MouseButton1Click", "Activated"}) do
-            local ok, handlers = pcall(function() return getconnections(equipmentButton[signal]) end)
-            if ok and type(handlers) == "table" then
-                for _, connection in pairs(handlers) do
-                    local usable, enabled = pcall(function() return connection.Enabled ~= false end)
-                    if usable and enabled then ready = true; break end
-                end
-            end
-            if ready then break end
-        end
-        if ready then break end
-        task.wait(0.25)
-        equipmentButton = awaitPath(interface, {"Topbar", "Main", "Categories", "Equipment", "Interact"})
-    end
-    task.wait(0.5)
-    -- Avoid toggling an already-open Equipment menu closed on a rerun.
-    if not isVisible(equipment) then
-        openEquipment(interface)
-    end
-    print("[AUTO PRESTIGE] Opening Upgrades after Equipment readiness check.")
-    click(awaitPath(equipment, {"Categories", "Upgrades", "Main", "Interact"}))
-    task.wait(1)
-
+    local equipment = findPath(interface, {"Equipment"})
     local values = require(ReplicatedStorage.Modules.Storage.Values)
-    local beforeTitle = findPath(equipment, {"Categories", "Upgrades", "Main", "Title"})
+
+    local beforeTitle = equipment and findPath(equipment, {"Categories", "Upgrades", "Main", "Title"})
     local beforeText = beforeTitle and beforeTitle.Text:gsub("<[^>]*>", ""):upper() or ""
     local beforeGrade = beforeText:match("%[([A-S][%+%-]?)%s+GRADE%]")
         or beforeText:match("%[GRADE%s+([A-S][%+%-]?)%]")
@@ -617,40 +585,40 @@ local function tryPrestige(player)
     local env = type(getgenv) == "function" and getgenv() or _G
     env.AutoPrestigeNotEligible = nil
     local interface = awaitPath(player, {"PlayerGui", "Interface"})
-    local equipment = awaitPath(interface, {"Equipment"})
-    openEquipment(interface)
-    local prestigeTab = awaitPath(equipment, {"Categories", "Prestige", "Main", "Interact"})
-    local deadline = os.clock() + 3
-    repeat
-        if isVisible(prestigeTab) then break end
-        task.wait(0.1)
-    until os.clock() >= deadline
-    if not isVisible(prestigeTab) then
-        print("[AUTO PRESTIGE] 4.0: Prestige tab not available for this account yet; continuing to Upgrades.")
-        return
-    end
-    click(prestigeTab)
-    task.wait(1)
+    local equipment = findPath(interface, {"Equipment"})
     local ranks = require(ReplicatedStorage.Modules.Storage.Ranks)
+
     local function readRank()
-        local label = findPath(equipment, {"Prestige", "Progress", "Title"})
-        if not label then return nil end
-        local text = label.Text:gsub("<[^>]*>", ""):upper():match("^%s*(.-)%s*$")
-        if text == "ENLIST" then return 0 end
-        for index, rank in pairs(ranks) do if text == rank.Tag:upper() then return index end end
+        local label = equipment and findPath(equipment, {"Prestige", "Progress", "Title"})
+        if label and label.Text ~= "" then
+            local text = label.Text:gsub("<[^>]*>", ""):upper():match("^%s*(.-)%s*$")
+            if text == "ENLIST" then return 0 end
+            for index, rank in pairs(ranks) do
+                if text == rank.Tag:upper() then return index end
+            end
+        end
+        local saved = env.AutoPrestigeRank
+        if saved and type(saved.rank) == "number" then return saved.rank end
+        return nil
     end
+
     local function saveRank(rank)
-        local env = type(getgenv) == "function" and getgenv() or _G
         local data = {rank = rank, userId = player.UserId, gameId = game.GameId}
         env.AutoPrestigeRank = data
         if type(writefile) == "function" then
-            writefile(prestigeFile(player), game:GetService("HttpService"):JSONEncode(data))
+            pcall(function()
+                writefile(prestigeFile(player), game:GetService("HttpService"):JSONEncode(data))
+            end)
         end
     end
-    local rank = readRank()
-    assert(rank ~= nil, "4.0: Cannot identify Prestige rank; stopping before purchases/reset.")
+
+    local rank = readRank() or 0
     saveRank(rank)
-    if not ranks[rank + 1] then return end
+    if not ranks[rank + 1] then
+        print("[AUTO PRESTIGE] Highest rank reached (no rank " .. tostring(rank + 1) .. ").")
+        return
+    end
+
     local topbar = require(ReplicatedStorage.Modules["User Interface"].Topbar)
     local gold
     for _, entry in pairs(topbar.Objects) do
@@ -659,279 +627,123 @@ local function tryPrestige(player)
         end
     end
     if type(gold) ~= "number" then
-        local text = awaitPath(interface, {"Topbar", "Main", "Currencies", "Gold", "Amount"}).Text
-        text = text:gsub("<[^>]*>", ""):gsub(",", ""):gsub("%s", "")
-        if text:match("^%d+$") then gold = tonumber(text) end
+        local goldLabel = findPath(interface, {"Topbar", "Main", "Currencies", "Gold", "Amount"})
+        local text = goldLabel and goldLabel.Text:gsub("<[^>]*>", ""):gsub(",", ""):gsub("%s", "")
+        if text and text:match("^%d+$") then gold = tonumber(text) end
     end
+
     local target = configuredPrestigeGold(rank)
     if target == nil then
         print("[AUTO PRESTIGE] P1-P5 configuration complete; skipping further Prestige.")
         return
     end
-    print("[AUTO PRESTIGE] 4.0: P" .. rank .. " | Gold " .. tostring(gold) .. " | Target " .. target)
+    print("[AUTO PRESTIGE] Prestige: P" .. rank .. " | Gold " .. tostring(gold) .. " | Target " .. tostring(target))
     if target > 0 and (type(gold) ~= "number" or gold < target) then
         print("[AUTO PRESTIGE] Prestige skipped: Gold below target or exact balance unavailable.")
         return
     end
-    local start = awaitPath(equipment, {"Prestige", "B_Prestige"})
-    if not isVisible(start) then
-        print("[AUTO PRESTIGE] 4.0: Gold ready, but Level/XP or next-rank eligibility not ready.")
-        env.AutoPrestigeNotEligible = true
-        return
-    end
-    env.AutoPrestigeNotEligible = nil
-    local function waitUntil(callback, description, seconds)
-        local deadline = os.clock() + (seconds or 30)
-        repeat
-            local result = callback()
-            if result then return result end
-            task.wait(0.1)
-        until os.clock() >= deadline
-        error("4.0 timeout: " .. description .. "; no automatic reset retry.")
-    end
-    local warning = awaitPath(interface, {"Warning"})
-    assert(not isVisible(warning), "4.0: Another confirmation is open.")
-    click(start)
-    waitUntil(function()
-        local title = findPath(warning, {"Prompt", "Main", "Title"})
-        return isVisible(warning) and title and title.Text:lower():find("prestige", 1, true)
-    end, "Prestige confirmation")
-    task.wait(0.3)
-    click(awaitPath(warning, {"Prompt", "Main", "Yes"}))
-    local memories = require(ReplicatedStorage.Modules.Storage.Memories)
-    local function cardFrame(card)
-        return findPath(card, {"Holder", "Front", "Main"})
-    end
-    local function liveCards(category)
-        local root = findPath(workspace, {"Objects", "Blackout", "Memories"})
-        local found = {}
-        for _, card in ipairs(root and root:GetChildren() or {}) do
-            local info = findPath(card, {"Holder", "Front", "Main", "Inner", "Info"})
-            if info and info:GetAttribute("Category") == category then
-                found[#found + 1] = card
+    -- ========================================================
+    -- THỰC HIỆN PRESTIGE 100% BẰNG REMOTE (KHÔNG CLICK)
+    -- ========================================================
+    print("=======================================================")
+    print("[AUTO PRESTIGE] TIẾN HÀNH PRESTIGE 100% BẰNG REMOTE...")
+    print("=======================================================")
+
+    local Event = ReplicatedStorage:WaitForChild("Assets"):WaitForChild("Remotes"):WaitForChild("GET")
+    local Memories = require(ReplicatedStorage:WaitForChild("Modules"):WaitForChild("Storage"):WaitForChild("Memories"))
+
+    -- 1. Tìm Tag chuẩn của Gold Boost
+    local goldBoostTag = "Gold Boost"
+    if Memories.Boosts then
+        for id, boost in pairs(Memories.Boosts) do
+            if boost.Tag and string.find(string.upper(boost.Tag), "GOLD") then
+                goldBoostTag = boost.Tag
+                break
             end
         end
-        return found
     end
-    local function offered(category, seconds)
-        local previous, stableSince = {}, os.clock()
-        local list = waitUntil(function()
-            local found = liveCards(category)
-            local same = #found == #previous
-            for index, card in ipairs(found) do
-                if previous[index] ~= card then same = false end
-            end
-            if not same then previous, stableSince = found, os.clock() end
-            if #found > 0 and os.clock() - stableSince >= 1.5
-                and (category ~= "Boosts" or #found == 3) then return found end
-        end, category .. " cards dealt", seconds)
-        local names = {}
-        for _, card in ipairs(list) do names[#names + 1] = card.Name end
-        print("[AUTO PRESTIGE] 4.0 " .. category .. " offers: " .. table.concat(names, ", "))
-        return list
-    end
-    local confirm = awaitPath(interface, {"Memories_Buttons", "M_Confirm"})
-    local virtualInput = game:GetService("VirtualInputManager")
-    local function registered(expectedText, seconds)
-        local deadline = os.clock() + (seconds or 2)
-        repeat
-            if isVisible(confirm) and confirm.Title.Text:upper() == expectedText then return true end
-            task.wait(0.1)
-        until os.clock() >= deadline
-        return false
-    end
-    -- Path 1: dispatch the module's own MouseClick handler.
-    local function fireHandlers(detector)
-        if type(getconnections) ~= "function" then return false end
-        local ok, handlers = pcall(function() return getconnections(detector.MouseClick) end)
-        if not ok or type(handlers) ~= "table" or #handlers == 0 then return false end
-        local fired = false
-        for _, connection in ipairs(handlers) do
-            if connection.Enabled ~= false then
-                local success = pcall(function() connection:Fire(player) end)
-                fired = fired or success
+    print("[AUTO PRESTIGE] Chọn Boost: " .. tostring(goldBoostTag))
+
+    -- 2. Dịch 3 ID đã roll ra thành tên thẻ (Tag)
+    local rolledIDs = {}
+    local root = workspace:FindFirstChild("Objects") 
+        and workspace.Objects:FindFirstChild("Blackout") 
+        and workspace.Objects.Blackout:FindFirstChild("Memories")
+    if root then
+        for _, card in ipairs(root:GetChildren()) do
+            local info = card:FindFirstChild("Holder") 
+                and card.Holder:FindFirstChild("Front")
+                and card.Holder.Front:FindFirstChild("Main")
+                and card.Holder.Front.Main:FindFirstChild("Inner")
+                and card.Holder.Front.Main.Inner:FindFirstChild("Info")
+            if info and info:GetAttribute("Category") == "Talents" then
+                table.insert(rolledIDs, card.Name)
             end
         end
-        return fired
     end
-    -- Path 2: executor click-detector emulation for executors that block getconnections.
-    local function fireDetector(detector)
-        local call = type(fireclickdetector) == "function" and fireclickdetector
-            or type(getgenv) == "function" and getgenv().fireclickdetector
-        if type(call) ~= "function" then return false end
-        return (pcall(call, detector))
+    if #rolledIDs == 0 then
+        rolledIDs = {"18", "3", "2"}
     end
-    -- Path 3: real mouse click on the card part. Some ClickDetectors ignore synthetic
-    -- handler fires but honour a mouse click at the part's viewport position.
-    local function fireVirtual(card)
-        local camera = workspace.CurrentCamera
-        if not camera then return false end
-        -- Click the card part, not its separate Info detector.
-        local part = card:IsA("BasePart") and card or card:FindFirstChildWhichIsA("BasePart", true)
-        if not part then return false end
-        local position, onScreen = camera:WorldToScreenPoint(part.Position)
-        if not onScreen or position.Z <= 0 then return false end
-        local x, y = position.X, position.Y
-        local ok = pcall(function()
-            virtualInput:SendMouseMoveEvent(x, y, game)
-            task.wait(0.08)
-            virtualInput:SendMouseButtonEvent(x, y, 0, true, game, 0)
-            task.wait(0.08)
-            virtualInput:SendMouseButtonEvent(x, y, 0, false, game, 0)
+
+    local talentTags = {}
+    local function getTalentInfo(id)
+        local strId = tostring(id)
+        local numId = tonumber(id)
+        for rarity, talents in pairs(Memories.Talents or {}) do
+            local info = talents[strId] or (numId and talents[numId])
+            if info then
+                return info.Tag, rarity, info.Stars
+            end
+        end
+        return tostring(id), "Unknown", 1
+    end
+
+    for _, id in ipairs(rolledIDs) do
+        local tag, rarity, stars = getTalentInfo(id)
+        table.insert(talentTags, {ID = id, Tag = tag})
+        print(string.format("[AUTO PRESTIGE] [Talent] ID %s -> Tag: '%s' (%s, %d sao)", tostring(id), tag, rarity, stars or 1))
+    end
+
+    local picked = talentTags[1]
+    print(string.format("[AUTO PRESTIGE] [★] CHỌN THẺ ĐỂ PRESTIGE: '%s' (ID %s)", picked.Tag, picked.ID))
+
+    local selection = {
+        ["Boosts"] = goldBoostTag,
+        ["Talents"] = picked.Tag
+    }
+
+    print(string.format("[AUTO PRESTIGE] Gửi Remote: Boosts = '%s' | Talents = '%s'...", selection.Boosts, selection.Talents))
+
+    local ok, finalData, skillPoints, rankId = pcall(function()
+        return Event:InvokeServer("S_Equipment", "Prestige", selection)
+    end)
+
+    -- Dự phòng: Nếu Server muốn nhận ID dạng số thay vì chữ
+    if ok and finalData == nil then
+        print("[AUTO PRESTIGE] Thử lại phương án 2: Gửi ID thay vì Tag...")
+        selection.Talents = tostring(picked.ID)
+        ok, finalData, skillPoints, rankId = pcall(function()
+            return Event:InvokeServer("S_Equipment", "Prestige", selection)
         end)
-        return ok
     end
-    local function clickVirtual(button, expectedText)
-        if not button.Parent or not isVisible(button) then return false end
-        local position, size = button.AbsolutePosition, button.AbsoluteSize
-        if size.X <= 0 or size.Y <= 0 then return false end
-        local x, y = position.X + size.X / 2, position.Y + size.Y / 2
-        print("[AUTO PRESTIGE] 4.0 virtual confirm click: " .. expectedText
-            .. " at " .. math.floor(x) .. "," .. math.floor(y))
-        local ok, message = pcall(function()
-            virtualInput:SendMouseMoveEvent(x, y, game)
-            task.wait(0.15)
-            virtualInput:SendMouseButtonEvent(x, y, 0, true, game, 0)
-            task.wait(0.1)
-            virtualInput:SendMouseButtonEvent(x, y, 0, false, game, 0)
-        end)
-        if not ok then warn("[AUTO PRESTIGE] 4.0 virtual confirm failed: " .. tostring(message)) end
-        return ok
+
+    if ok and type(finalData) == "table" and finalData.Progression then
+        local newRank = finalData.Progression.Prestige or (rank + 1)
+        print("=======================================================")
+        print(string.format("[AUTO PRESTIGE] [🎉] PRESTIGE THÀNH CÔNG! Bậc mới: %s | Level mới: %s",
+            tostring(newRank),
+            tostring(finalData.Progression.Level)
+        ))
+        print("=======================================================")
+        saveRank(newRank)
+        sendLobbyResult("PRESTIGE SUCCESS", {
+            {name = "New Prestige Rank", value = tostring(newRank), inline = true},
+            {name = "New Level", value = tostring(finalData.Progression.Level), inline = true},
+            {name = "Skill Points", value = tostring(skillPoints), inline = true},
+        })
+    else
+        warn("[AUTO PRESTIGE] Prestige phản hồi: " .. tostring(ok) .. " | " .. tostring(finalData))
     end
-    local selectedCard
-    local function confirmationAccepted(expectedText)
-        if expectedText == "NEXT" then
-            return #liveCards("Talents") > 0
-                or (selectedCard and selectedCard.Parent == nil)
-        end
-        return (selectedCard and selectedCard.Parent == nil)
-            or not isVisible(interface:FindFirstChild("Memories_Buttons"))
-    end
-    local function pressConfirm(expectedText)
-        waitUntil(function()
-            return isVisible(confirm) and confirm.Title.Text:upper() == expectedText
-        end, "visible " .. expectedText .. " button")
-        task.wait(0.4)
-        local deadline = os.clock() + 30
-        local attempt = 0
-        while not confirmationAccepted(expectedText) and os.clock() < deadline do
-            attempt = attempt + 1
-            if attempt % 2 == 1 then
-                print("[AUTO PRESTIGE] 4.0 pressing " .. expectedText .. " through UI handler.")
-                local ok, message = pcall(click, confirm, "MouseButton1Click")
-                if not ok then warn("[AUTO PRESTIGE] 4.0 confirm handler: " .. tostring(message)) end
-            else
-                clickVirtual(confirm, expectedText)
-            end
-            local acceptedAt = os.clock() + 5
-            repeat
-                if confirmationAccepted(expectedText) then
-                    print("[AUTO PRESTIGE] 4.0 " .. expectedText .. " accepted.")
-                    return
-                end
-                task.wait(0.1)
-            until os.clock() >= acceptedAt
-        end
-        assert(confirmationAccepted(expectedText), "4.0: " .. expectedText
-            .. " did not register after UI-handler and mouse-click attempts.")
-    end
-    local function selectCard(card, expectedText)
-        local frame = cardFrame(card)
-        assert(frame, "4.0: card frame missing: " .. tostring(card.Name))
-        assert(card.Parent, "4.0: offered card disappeared before selection.")
-        selectedCard = card
-        local detector = card:FindFirstChild("Click")
-        assert(detector and detector:IsA("ClickDetector"), "4.0: card has no Click detector.")
-        do
-            local paths = {
-                {"getconnections", function() return fireHandlers(detector) end},
-                {"fireclickdetector", function() return fireDetector(detector) end},
-                {"virtual click", function() return fireVirtual(card) end},
-            }
-            local accepted = false
-            for _, path in ipairs(paths) do
-                if path[2]() and registered(expectedText, 2) then
-                    accepted = true
-                    break
-                end
-                warn("[AUTO PRESTIGE] 4.0 " .. path[1] .. " did not reveal " .. expectedText
-                    .. " for " .. card:GetFullName())
-                task.wait(0.3)
-            end
-            assert(accepted, "4.0: card click never registered.")
-        end
-        waitUntil(function() return isVisible(confirm) and confirm.Title.Text:upper() == expectedText end,
-            "selected card confirmation " .. expectedText)
-        pressConfirm(expectedText)
-    end
-    local boosts = offered("Boosts", 90)
-    local function goldLabel(value)
-        return type(value) == "string"
-            and value:gsub("<[^>]*>", ""):upper():match("^%s*(.-)%s*$") == "GOLD BOOST"
-    end
-    local goldCard, how
-    for _, card in ipairs(boosts) do
-        local title = findPath(card, {"Holder", "Front", "Main", "Inner", "Middle", "Title"})
-        if goldLabel(card.Name) or (title and goldLabel(title.Text)) then
-            goldCard, how = card, "Gold Boost label"
-            break
-        end
-    end
-    if not goldCard then
-        for id, boost in pairs(memories.Boosts) do
-            if goldLabel(boost.Tag) then
-                for _, card in ipairs(boosts) do
-                    if card.Name == boost.Tag or card.Name == tostring(id) then
-                        goldCard, how = card, "Gold Boost data"
-                        break
-                    end
-                end
-            end
-            if goldCard then break end
-        end
-    end
-    assert(goldCard, "4.0: no Gold Boost among " .. #boosts .. " offers; refusing to pick another Boost.")
-    print("[AUTO PRESTIGE] 4.0 selecting " .. goldCard.Name .. " (" .. how .. ")")
-    selectCard(goldCard, "NEXT")
-    local talents = offered("Talents", 60)
-    local picked = {}
-    for _, card in ipairs(talents) do
-        if card.Name ~= "Empty" then picked[#picked + 1] = card end
-    end
-    assert(#picked > 0, "4.0: every offered talent card is empty.")
-    local selected = picked[math.random(1, #picked)]
-    print("[AUTO PRESTIGE] 4.0: Gold Boost + random talent " .. selected.Name
-        .. " (" .. #picked .. " offered)")
-    selectCard(selected, "FINISH")
-    waitUntil(function()
-        local buttons = interface:FindFirstChild("Memories_Buttons")
-        local current = readRank()
-        return isVisible(equipment) and buttons and not isVisible(buttons) and current == rank + 1
-    end, "completed Prestige and updated rank", 120)
-    saveRank(rank + 1)
-    print("[AUTO PRESTIGE] 4.0: Prestige " .. (rank + 1) .. " confirmed.")
-    -- Rank/UI visibility can update before the cutscene cleanup and Equipment fade finish.
-    print("[AUTO PRESTIGE] Waiting for post-Prestige UI to remain stable for 5 seconds...")
-    local stableSince
-    waitUntil(function()
-        local closeout = interface:FindFirstChild("Closeout")
-        local topbarUI = interface:FindFirstChild("Topbar")
-        local buttons = interface:FindFirstChild("Memories_Buttons")
-        local upgrades = findPath(equipment, {"Categories", "Upgrades", "Main", "Interact"})
-        local stable = workspace:FindFirstChild("World") ~= nil
-            and workspace:FindFirstChild("Paths") == nil
-            and isVisible(equipment) and topbarUI and isVisible(topbarUI)
-            and buttons and not isVisible(buttons)
-            and (not closeout or not isVisible(closeout))
-            and upgrades and isVisible(upgrades)
-        if not stable then
-            stableSince = nil
-            return false
-        end
-        stableSince = stableSince or os.clock()
-        return os.clock() - stableSince >= 5
-    end, "stable post-Prestige Equipment UI", 45)
-    print("[AUTO PRESTIGE] Post-Prestige UI settled; continuing to Upgrades.")
 end
 
 local function autoCleanPerks(player)
