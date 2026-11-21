@@ -1758,16 +1758,16 @@ local function startMissionFarm()
         return count, segments
     end
     local function getRefillPart()
-        -- Breach uses Objective.Breach.HQ, not the generic Props.HQ.
-        -- Resolve by name: GetChildren()[186] is not a stable identifier.
+        local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+        -- 1. Known HQ paths (Breach, Waves, Props)
         for _, names in ipairs({
             {"Unclimbable", "Objective", "Breach", "HQ"},
+            {"Unclimbable", "Objective", "Waves"},
             {"Unclimbable", "Props", "HQ"},
         }) do
             local hq = path(workspace, names)
             if hq then
                 local nearest, distance = nil, math.huge
-                local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
                 for _, part in ipairs(hq:GetDescendants()) do
                     if part.Name == "Refill" and part:IsA("BasePart") then
                         local magnitude = root and (root.Position - part.Position).Magnitude or 0
@@ -1777,6 +1777,27 @@ local function startMissionFarm()
                 if nearest then return nearest end
             end
         end
+        -- 2. Fallback: Search all of Unclimbable
+        local unclimbable = workspace:FindFirstChild("Unclimbable")
+        if unclimbable then
+            local nearest, distance = nil, math.huge
+            for _, part in ipairs(unclimbable:GetDescendants()) do
+                if part.Name == "Refill" and part:IsA("BasePart") then
+                    local magnitude = root and (root.Position - part.Position).Magnitude or 0
+                    if magnitude < distance then nearest, distance = part, magnitude end
+                end
+            end
+            if nearest then return nearest end
+        end
+        -- 3. Universal Fallback: Search entire workspace
+        local nearest, distance = nil, math.huge
+        for _, part in ipairs(workspace:GetDescendants()) do
+            if part.Name == "Refill" and part:IsA("BasePart") then
+                local magnitude = root and (root.Position - part.Position).Magnitude or 0
+                if magnitude < distance then nearest, distance = part, magnitude end
+            end
+        end
+        return nearest
     end
     local function napeOf(titan)
         return path(titan, {"Hitboxes", "Hit", "Nape"}) or titan:FindFirstChild("Nape", true)
@@ -1851,36 +1872,29 @@ local function startMissionFarm()
                     root.CFrame = station.CFrame + Vector3.new(0, 3, 0)
                     root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
                     root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-                    -- Give the station one second to register the presence; leave early if full.
-                    local arrivalDeadline = os.clock() + 1
-                    repeat
-                        if not valid() then return end
-                        local atStation = bladeStatus(character)
-                        if atStation == nil or atStation > 0 then break end
-                        task.wait(0.05)
-                    until os.clock() >= arrivalDeadline
+                    task.wait(0.4) -- Wait for player position to replicate to server at station
+
                     if not valid() then return end
-                    local beforeSets = bladeStatus(character)
-                    if beforeSets == nil then error("Blade state unreadable at refill station.") end
-                    if beforeSets == 0 then
-                        post:FireServer("Attacks", "Reload", station)
-                        -- Reload is applied server-side on call. Leave the station at once so a
-                        -- titan cannot hit the character, and confirm the refill from safety.
-                        restore()
-                    end
-                    local deadline = os.clock() + 10
+                    post:FireServer("Attacks", "Reload", station)
+
+                    -- Wait at station for server to process and replicate new blade sets
+                    local deadline = os.clock() + 3
                     repeat
+                        task.wait(0.1)
                         if not valid() then return end
                         local sets = bladeStatus(character)
                         if sets and sets > 0 then
                             print("[AUTO PRESTIGE] Refill confirmed: " .. sets .. " reserve set(s); farm resumes.")
-                            return
+                            break
                         end
-                        task.wait(0.05)
                     until os.clock() >= deadline
-                    warn("[AUTO PRESTIGE] Refill not confirmed within 10 seconds; next cycle will retry.")
+
+                    -- Immediately load blade into hands from reserve
+                    key(Enum.KeyCode.R)
+                    task.wait(0.3)
                 end)
                 restore()
+                emptySince, emptyCharacter = nil, nil
                 if not ok then warn("[AUTO PRESTIGE] Refill failed: " .. tostring(err)) end
             else
                 refillWarning(not station and "HQ refill part not found."
@@ -1916,7 +1930,7 @@ local function startMissionFarm()
         end
         local hand = rig(character):FindFirstChild("LeftHand", true)
         local blade = hand and hand:FindFirstChild("Blade_1")
-        if blade and blade:GetAttribute("Broken") == true then
+        if (setsLeft and setsLeft > 0 and segmentsLeft == 0) or (blade and blade:GetAttribute("Broken") == true) then
             root.Anchored = true
             key(Enum.KeyCode.R)
             task.wait(0.6)
