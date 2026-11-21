@@ -357,9 +357,13 @@ local function openEquipment(interface)
 end
 
 local function upgradeAll(player, interface, equipment, values)
-    local Event = ReplicatedStorage:WaitForChild("Assets")
-                                   :WaitForChild("Remotes")
-                                   :WaitForChild("GET")
+    local assets = ReplicatedStorage:FindFirstChild("Assets")
+    local remotes = assets and assets:FindFirstChild("Remotes")
+    local Event = remotes and remotes:FindFirstChild("GET")
+    if not Event then
+        warn("[AUTO PRESTIGE] GET Remote not found for upgradeAll.")
+        return nil, nil
+    end
 
     local statsList = {
         "Blade_Durability",
@@ -379,18 +383,30 @@ local function upgradeAll(player, interface, equipment, values)
 
     -- Lặp lại gọi Remote cho đến khi nâng hết số vàng có thể nâng (tối đa 120 lần để chống lặp vô hạn)
     for i = 1, 120 do
+        -- Sắp xếp ưu tiên chỉ số cấp thấp hơn nếu có dữ liệu
+        if lastData then
+            local weapon = lastData.Weapon or (lastData.Slots and lastData.Current_Slot and lastData.Slots[lastData.Current_Slot] and lastData.Slots[lastData.Current_Slot].Weapon) or "ODM"
+            local upTable = lastData.Upgrades and lastData.Upgrades[weapon]
+                or (lastData.Slots and lastData.Current_Slot and lastData.Slots[lastData.Current_Slot] and lastData.Slots[lastData.Current_Slot].Upgrades and lastData.Slots[lastData.Current_Slot].Upgrades[weapon])
+            if upTable then
+                table.sort(statsList, function(a, b)
+                    return (upTable[a] or 0) < (upTable[b] or 0)
+                end)
+            end
+        end
+
         local ok, data = pcall(function()
             return Event:InvokeServer("S_Equipment", "Upgrade", statsList)
         end)
-        
+
         -- Nếu server trả về nil nghĩa là không đủ vàng hoặc lỗi
         if not ok or data == nil or type(data) ~= "table" then
             break
         end
-        
+
         lastData = data
         totalUpgrades = totalUpgrades + 1
-        task.wait(0.1) -- Giãn cách 0.1s giữa các lần nâng
+        task.wait(0.08) -- Giãn cách 0.08s giữa các lần nâng
     end
 
     if totalUpgrades > 0 then
@@ -398,6 +414,8 @@ local function upgradeAll(player, interface, equipment, values)
     else
         print("[AUTO PRESTIGE] No upgrades purchased (maxed or insufficient Gold).")
     end
+
+    local newPotential = nil
 
     -- Cập nhật lại giao diện Topbar & Title trên màn hình của game
     if lastData then
@@ -412,18 +430,18 @@ local function upgradeAll(player, interface, equipment, values)
                     Topbar.Refresh(player, lastData)
                 end
             end
-            
+
             -- 2. Cập nhật Title Grade trên giao diện Equipment
             local SharedModule = ReplicatedStorage:FindFirstChild("Modules")
                 and ReplicatedStorage.Modules:FindFirstChild("Shared")
                 and ReplicatedStorage.Modules.Shared:FindFirstChild("Shared")
             if SharedModule then
                 local Shared = require(SharedModule)
-                local newPotential = Shared.Get_Potential(nil, player, lastData)
+                newPotential = Shared.Get_Potential(nil, player, lastData)
                 if newPotential and values.Pot_Tags[newPotential] then
                     local gradeTag = values.Pot_Tags[newPotential]
                     print(string.format("[AUTO PRESTIGE] Current Grade after upgrade: [%s GRADE]", gradeTag))
-                    
+
                     local title = findPath(equipment, {"Categories", "Upgrades", "Main", "Title"})
                     if title then
                         title.Text = "UPGRADES [" .. gradeTag .. " GRADE]"
@@ -433,6 +451,7 @@ local function upgradeAll(player, interface, equipment, values)
         end)
     end
     print("[AUTO PRESTIGE] Equipment upgrade via Remote finished.")
+    return lastData, newPotential
 end
 
 local function saveNextGradePlan(player, equipment, values, potential, currentGrade)
@@ -447,18 +466,22 @@ local function saveNextGradePlan(player, equipment, values, potential, currentGr
     end
 
     if potential == nil or potential >= 15 or not values.Upgrade_Costs or not values.Upgrade_Costs[potential + 1] then
-        plan.isMaxGrade = true
+        plan.isMaxGrade = (type(potential) == "number" and potential >= 15)
         plan.goldTarget = nil
         plan.targetGrade = nil
         save()
-        print("[AUTO PRESTIGE] Grade " .. tostring(currentGrade or potential) .. " is MAX grade (S-). No Lobby return needed for upgrades.")
+        if plan.isMaxGrade then
+            print("[AUTO PRESTIGE] Grade " .. tostring(currentGrade or potential) .. " is MAX grade (S-). No Lobby return needed for upgrades.")
+        else
+            warn("[AUTO PRESTIGE] Grade potential unreadable; goldTarget unset (will not assume max grade).")
+        end
         return
     end
 
     local target = potential + 1
     local price = values.Upgrade_Costs[target]
     if not (type(price) == "number" and price > 0) then
-        plan.isMaxGrade = true
+        plan.isMaxGrade = (type(potential) == "number" and potential >= 15)
         plan.goldTarget = nil
         plan.targetGrade = nil
         save()
@@ -494,24 +517,32 @@ local function readDifficulty(player)
     local beforeText = beforeTitle and beforeTitle.Text:gsub("<[^>]*>", ""):upper() or ""
     local beforeGrade = beforeText:match("%[([A-S][%+%-]?)%s+GRADE%]")
         or beforeText:match("%[GRADE%s+([A-S][%+%-]?)%]")
-    local upgraded, upgradeError = pcall(upgradeAll, player, interface, equipment, values)
+    
+    local upgraded, lastData, remotePotential = pcall(upgradeAll, player, interface, equipment, values)
     if not upgraded then
-        warn("[AUTO PRESTIGE] Upgrade stopped; continuing step 2: " .. tostring(upgradeError))
+        warn("[AUTO PRESTIGE] Upgrade stopped; continuing step 2: " .. tostring(lastData))
     end
-    local gradeIndex, grade
-    pcall(function()
-        local SharedModule = ReplicatedStorage:FindFirstChild("Modules")
-            and ReplicatedStorage.Modules:FindFirstChild("Shared")
-            and ReplicatedStorage.Modules.Shared:FindFirstChild("Shared")
-        if SharedModule then
-            local Shared = require(SharedModule)
-            local pot = Shared.Get_Potential(nil, player)
-            if pot and values.Pot_Tags[pot] then
-                gradeIndex = pot
-                grade = values.Pot_Tags[pot]
+
+    local gradeIndex = type(remotePotential) == "number" and remotePotential or nil
+    local grade = gradeIndex and values.Pot_Tags[gradeIndex] or nil
+
+    if not gradeIndex then
+        pcall(function()
+            local SharedModule = ReplicatedStorage:FindFirstChild("Modules")
+                and ReplicatedStorage.Modules:FindFirstChild("Shared")
+                and ReplicatedStorage.Modules.Shared:FindFirstChild("Shared")
+            if SharedModule then
+                local Shared = require(SharedModule)
+                local pot = (lastData and Shared.Get_Potential(nil, player, lastData))
+                    or Shared.Get_Potential(nil, player)
+                if pot and values.Pot_Tags[pot] then
+                    gradeIndex = pot
+                    grade = values.Pot_Tags[pot]
+                end
             end
-        end
-    end)
+        end)
+    end
+
     if not grade then
         local found = waitForValue(function()
             local title = findPath(equipment, {"Categories", "Upgrades", "Main", "Title"})
