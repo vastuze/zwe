@@ -508,24 +508,39 @@ local function sendLobbyResult(result, fields)
 end
 
 local function readDifficulty(player)
-    local gui = awaitPath(player, {"PlayerGui"})
-    local interface = awaitPath(gui, {"Interface"})
-    local equipment = findPath(interface, {"Equipment"})
     local values = require(ReplicatedStorage.Modules.Storage.Values)
+    local env = type(getgenv) == "function" and getgenv() or _G
 
-    local beforeTitle = equipment and findPath(equipment, {"Categories", "Upgrades", "Main", "Title"})
-    local beforeText = beforeTitle and beforeTitle.Text:gsub("<[^>]*>", ""):upper() or ""
-    local beforeGrade = beforeText:match("%[([A-S][%+%-]?)%s+GRADE%]")
-        or beforeText:match("%[GRADE%s+([A-S][%+%-]?)%]")
-    
-    local upgraded, lastData, remotePotential = pcall(upgradeAll, player, interface, equipment, values)
-    if not upgraded then
-        warn("[AUTO PRESTIGE] Upgrade stopped; continuing step 2: " .. tostring(lastData))
+    -- 1. Đọc plan đã lưu trước đó (nếu có)
+    local planFile = "auto_prestige_grade_" .. tostring(game.GameId) .. "_" .. tostring(player.UserId) .. ".json"
+    local savedPlan = env.AutoPrestigeGradePlan
+    if type(readfile) == "function" and isfile and isfile(planFile) then
+        pcall(function()
+            local decoded = game:GetService("HttpService"):JSONDecode(readfile(planFile))
+            if type(decoded) == "table" and decoded.userId == player.UserId and decoded.gameId == game.GameId then
+                savedPlan = decoded
+                env.AutoPrestigeGradePlan = decoded
+            end
+        end)
     end
 
-    local gradeIndex = type(remotePotential) == "number" and remotePotential or nil
-    local grade = gradeIndex and values.Pot_Tags[gradeIndex] or nil
+    local beforeGrade = savedPlan and savedPlan.currentGrade
+    local gradeIndex = savedPlan and type(savedPlan.potential) == "number" and savedPlan.potential or nil
+    local grade = gradeIndex and values.Pot_Tags[gradeIndex] or beforeGrade
 
+    -- 2. Thử nâng cấp trang bị bằng Remote
+    local gui = findPath(player, {"PlayerGui"})
+    local interface = gui and findPath(gui, {"Interface"})
+    local equipment = interface and findPath(interface, {"Equipment"})
+
+    local upgraded, lastData, remotePotential = pcall(upgradeAll, player, interface, equipment, values)
+    if upgraded and type(remotePotential) == "number" then
+        gradeIndex = remotePotential
+        grade = values.Pot_Tags[gradeIndex]
+        print(string.format("[AUTO PRESTIGE] Grade updated via Remote: [%s GRADE] (Pot %d)", grade, gradeIndex))
+    end
+
+    -- 3. Nếu chưa có gradeIndex từ Remote, thử lấy từ Shared hoặc Module game
     if not gradeIndex then
         pcall(function()
             local SharedModule = ReplicatedStorage:FindFirstChild("Modules")
@@ -543,45 +558,77 @@ local function readDifficulty(player)
         end)
     end
 
-    if not grade then
-        local found = waitForValue(function()
-            local title = findPath(equipment, {"Categories", "Upgrades", "Main", "Title"})
-            if not title then return nil end
-            local text = title.Text:gsub("<[^>]*>", ""):upper()
-            grade = text:match("%[([A-S][%+%-]?)%s*GRADE%]")
-                or text:match("%[GRADE%s*([A-S][%+%-]?)%]")
-                or text:match("%[([A-S][%+%-]?)%]")
-            if grade then
-                for index, tag in pairs(values.Pot_Tags) do
-                    if tag == grade then gradeIndex = index; return true end
-                end
-            end
-            for index = 15, 0, -1 do
-                local tag = values.Pot_Tags[index]
-                if tag and (text:find("%[" .. tag:gsub("%+", "%%+"):gsub("%-", "%%-") .. "%]")
-                    or text:find("%f[%a]" .. tag:gsub("%+", "%%+"):gsub("%-", "%%-") .. "%f[%A]")) then
-                    gradeIndex = index
-                    grade = tag
-                    return true
+    if not gradeIndex then
+        pcall(function()
+            local eqMod = ReplicatedStorage:FindFirstChild("Modules")
+                and ReplicatedStorage.Modules:FindFirstChild("User Interface")
+                and ReplicatedStorage.Modules["User Interface"]:FindFirstChild("Equipment")
+            if eqMod then
+                local eq = require(eqMod)
+                if eq and type(eq.Potential) == "number" and values.Pot_Tags[eq.Potential] then
+                    gradeIndex = eq.Potential
+                    grade = values.Pot_Tags[gradeIndex]
                 end
             end
         end)
     end
-    assert(gradeIndex and grade, "Could not read Equipment Grade.")
-    local beforeIndex
-    for index, tag in pairs(values.Pot_Tags) do if tag == beforeGrade then beforeIndex = index end end
-    if beforeIndex and gradeIndex > beforeIndex then
+
+    if not gradeIndex and equipment then
+        pcall(function()
+            local title = findPath(equipment, {"Categories", "Upgrades", "Main", "Title"})
+            if title and title.Text ~= "" then
+                local text = title.Text:gsub("<[^>]*>", ""):upper()
+                local tag = text:match("%[([A-S][%+%-]?)%s*GRADE%]")
+                    or text:match("%[GRADE%s*([A-S][%+%-]?)%]")
+                    or text:match("%[([A-S][%+%-]?)%]")
+                if tag then
+                    for index, potTag in pairs(values.Pot_Tags) do
+                        if potTag == tag then
+                            gradeIndex = index
+                            grade = tag
+                            break
+                        end
+                    end
+                end
+            end
+        end)
+    end
+
+    -- 4. Nếu vẫn chưa có grade, dùng fallback an toàn - KHÔNG BAO GIỜ ĐƯỢC DỪNG BOT
+    if not gradeIndex or not grade then
+        if beforeGrade and values.Pot_Tags then
+            for index, potTag in pairs(values.Pot_Tags) do
+                if potTag == beforeGrade then
+                    gradeIndex = index
+                    grade = beforeGrade
+                    break
+                end
+            end
+        end
+    end
+
+    if not gradeIndex or not grade then
+        warn("[AUTO PRESTIGE] Grade could not be detected; using default Grade C (Potential 7) to continue mission farm.")
+        gradeIndex = 7
+        grade = values.Pot_Tags[7] or "C"
+    end
+
+    -- 5. Webhook thông báo nếu có nâng cấp
+    if beforeGrade and grade ~= beforeGrade then
         sendLobbyResult("GRADE UPGRADED", {
             {name = "Grade", value = beforeGrade .. " -> " .. grade, inline = true},
         })
     end
+
+    -- 6. Lưu plan mục tiêu Grade tiếp theo
     local planned, planError = pcall(saveNextGradePlan, player, equipment, values, gradeIndex, grade)
     if not planned then warn("[AUTO PRESTIGE] Grade target unavailable: " .. tostring(planError)) end
-    -- Refresh the reward ledger after spending Gold, before entering the map.
-    local env = type(getgenv) == "function" and getgenv() or _G
+
+    -- 7. Cập nhật số dư vàng vào ledger
     local watcher = env.AutoPrestigeRewardsWatcher
     if watcher and watcher.refreshBalance then watcher.refreshBalance() end
 
+    -- 8. Chọn độ khó thích hợp để vào trận farm tiếp
     local difficultyRanks = {
         ["easy"] = 1,
         ["normal"] = 2,
@@ -605,7 +652,9 @@ local function readDifficulty(player)
             end
         end
     end
-    assert(difficulty, "No eligible difficulty for Grade " .. tostring(grade))
+    if not difficulty then
+        difficulty = "Hard" -- Fallback an toàn để luôn vào trận
+    end
     print("[AUTO PRESTIGE] Step 1.5: Grade " .. tostring(grade) .. " (Pot " .. tostring(gradeIndex) .. ") -> Selected Difficulty: " .. difficulty .. " (Capped at Aberrant)")
     return difficulty
 end
