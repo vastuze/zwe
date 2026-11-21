@@ -1871,20 +1871,6 @@ local function startMissionFarm()
             release(); task.wait(0.1); return
         end
         if setsLeft == 0 and segmentsLeft == 0 then
-            -- Wait for a stable 0/7, not a temporary gap while blades are changing.
-            if emptyCharacter ~= character then
-                emptyCharacter, emptySince = character, os.clock()
-            elseif not emptySince then
-                emptySince = os.clock()
-            end
-            if os.clock() - emptySince < 0.5 then
-                release()
-                holdBeforeRefill(root)
-                task.wait(0.1)
-                return
-            end
-            release()
-            holdBeforeRefill(root)
             local station, post = getRefillPart(), remote("POST")
             if station and post and post:IsA("RemoteEvent") and valid() then
                 local oldCF = root.CFrame
@@ -1898,37 +1884,19 @@ local function startMissionFarm()
                     root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
                     root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
                 end
-                print("[AUTO PRESTIGE] Blades empty: teleporting to " .. station:GetFullName())
-                local ok, err = pcall(function()
+                print("[AUTO PRESTIGE] Blades empty: Teleport refill -> Bắn Remote -> Về lại vị trí cũ ngay lập tức!")
+                pcall(function()
                     clearRefillHold()
                     root.Anchored = false
                     root.CFrame = station.CFrame + Vector3.new(0, 3, 0)
                     root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
                     root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-                    task.wait(0.4) -- Wait for player position to replicate to server at station
 
-                    if not valid() then return end
                     post:FireServer("Attacks", "Reload", station)
-
-                    -- Wait at station for server to process and replicate new blade sets
-                    local deadline = os.clock() + 3
-                    repeat
-                        task.wait(0.1)
-                        if not valid() then return end
-                        local sets = bladeStatus(character)
-                        if sets and sets > 0 then
-                            print("[AUTO PRESTIGE] Refill confirmed: " .. sets .. " reserve set(s); farm resumes.")
-                            break
-                        end
-                    until os.clock() >= deadline
-
-                    -- Immediately load blade into hands from reserve
                     key(Enum.KeyCode.R)
-                    task.wait(0.3)
                 end)
                 restore()
                 emptySince, emptyCharacter = nil, nil
-                if not ok then warn("[AUTO PRESTIGE] Refill failed: " .. tostring(err)) end
             else
                 refillWarning(not station and "HQ refill part not found."
                     or "POST remote or character not ready.")
