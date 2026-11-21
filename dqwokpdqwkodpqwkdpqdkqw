@@ -353,24 +353,7 @@ local function click(button, preferredEvent, stillNeeded)
 end
 
 local function openEquipment(interface)
-    local equipment = awaitPath(interface, {"Equipment"})
-    if isVisible(equipment) then return equipment end
-    print("[AUTO PRESTIGE] Waiting for visible Equipment menu button...")
-    local deadline = os.clock() + 60
-    local button
-    repeat
-        button = findPath(interface, {"Topbar", "Main", "Categories", "Equipment", "Interact"})
-        if button and button:IsA("GuiButton") and isVisible(button) then break end
-        task.wait(0.25)
-    until os.clock() >= deadline
-    assert(button and isVisible(button), "Equipment entry remains hidden; finish the game's onboarding/menu first.")
-    click(button)
-    deadline = os.clock() + 15
-    repeat
-        if isVisible(equipment) then task.wait(0.7); return equipment end
-        task.wait(0.1)
-    until os.clock() >= deadline
-    error("Equipment did not open after clicking its menu button; no hidden UI was forced.")
+    return interface and interface:FindFirstChild("Equipment")
 end
 
 local function upgradeAll(player, interface, equipment, values)
@@ -516,29 +499,44 @@ local function readDifficulty(player)
         warn("[AUTO PRESTIGE] Upgrade stopped; continuing step 2: " .. tostring(upgradeError))
     end
     local gradeIndex, grade
-    local found = waitForValue(function()
-        local title = findPath(equipment, {"Categories", "Upgrades", "Main", "Title"})
-        if not title then return nil end
-        local text = title.Text:gsub("<[^>]*>", ""):upper()
-        grade = text:match("%[([A-S][%+%-]?)%s*GRADE%]")
-            or text:match("%[GRADE%s*([A-S][%+%-]?)%]")
-            or text:match("%[([A-S][%+%-]?)%]")
-        if grade then
-            for index, tag in pairs(values.Pot_Tags) do
-                if tag == grade then gradeIndex = index; return true end
-            end
-        end
-        for index = 15, 0, -1 do
-            local tag = values.Pot_Tags[index]
-            if tag and (text:find("%[" .. tag:gsub("%+", "%%+"):gsub("%-", "%%-") .. "%]")
-                or text:find("%f[%a]" .. tag:gsub("%+", "%%+"):gsub("%-", "%%-") .. "%f[%A]")) then
-                gradeIndex = index
-                grade = tag
-                return true
+    pcall(function()
+        local SharedModule = ReplicatedStorage:FindFirstChild("Modules")
+            and ReplicatedStorage.Modules:FindFirstChild("Shared")
+            and ReplicatedStorage.Modules.Shared:FindFirstChild("Shared")
+        if SharedModule then
+            local Shared = require(SharedModule)
+            local pot = Shared.Get_Potential(nil, player)
+            if pot and values.Pot_Tags[pot] then
+                gradeIndex = pot
+                grade = values.Pot_Tags[pot]
             end
         end
     end)
-    assert(found, "Could not read Equipment Grade.")
+    if not grade then
+        local found = waitForValue(function()
+            local title = findPath(equipment, {"Categories", "Upgrades", "Main", "Title"})
+            if not title then return nil end
+            local text = title.Text:gsub("<[^>]*>", ""):upper()
+            grade = text:match("%[([A-S][%+%-]?)%s*GRADE%]")
+                or text:match("%[GRADE%s*([A-S][%+%-]?)%]")
+                or text:match("%[([A-S][%+%-]?)%]")
+            if grade then
+                for index, tag in pairs(values.Pot_Tags) do
+                    if tag == grade then gradeIndex = index; return true end
+                end
+            end
+            for index = 15, 0, -1 do
+                local tag = values.Pot_Tags[index]
+                if tag and (text:find("%[" .. tag:gsub("%+", "%%+"):gsub("%-", "%%-") .. "%]")
+                    or text:find("%f[%a]" .. tag:gsub("%+", "%%+"):gsub("%-", "%%-") .. "%f[%A]")) then
+                    gradeIndex = index
+                    grade = tag
+                    return true
+                end
+            end
+        end)
+    end
+    assert(gradeIndex and grade, "Could not read Equipment Grade.")
     local beforeIndex
     for index, tag in pairs(values.Pot_Tags) do if tag == beforeGrade then beforeIndex = index end end
     if beforeIndex and gradeIndex > beforeIndex then
@@ -747,117 +745,8 @@ local function tryPrestige(player)
 end
 
 local function autoCleanPerks(player)
-    local threshold = configEnv.PerkPurgeThreshold or 100
-    local slots = {"Body", "Offense", "Defense", "Support"}
-
-    local interface = findPath(player, {"PlayerGui", "Interface"})
-    if not interface then return end
-    local equipment = openEquipment(interface)
-    if not equipment then return end
-
-    local perkTab = findPath(equipment, {"Categories", "Perks", "Main", "Interact"})
-        or findPath(equipment, {"Categories", "Perk", "Main", "Interact"})
-    if perkTab and isVisible(perkTab) then
-        click(perkTab)
-        task.wait(0.5)
-    end
-
-    local perkList = equipment:FindFirstChild("Perk_List")
-    local typesFolder = perkList and (perkList:FindFirstChild("Types") or perkList:WaitForChild("Types", 5))
-    local itemsHolder = perkList and findPath(perkList, {"Holder", "Items"})
-    if not typesFolder or not itemsHolder then return end
-
-    local limitLabel = equipment:FindFirstChild("Perk") and equipment.Perk:FindFirstChild("Limit")
-    if limitLabel and limitLabel.Text ~= "" then
-        local current, max = string.match(limitLabel.Text, "(%d+)%s*/%s*(%d+)")
-        if current and max then
-            local percent = math.floor((tonumber(current) / tonumber(max)) * 100)
-            print(string.format("[AUTO PERK] Inventory: %s/%s (%d%%)", current, max, percent))
-        end
-    end
-
-    local inventoryBySlot = {}
-    local totalByRarity = {}
-
-    for _, slotName in ipairs(slots) do
-        local slotObj = typesFolder:FindFirstChild(slotName)
-        if slotObj then
-            local interactBtn = (slotObj:FindFirstChild("Inner") and slotObj.Inner:FindFirstChild("Interact")) or slotObj
-            click(interactBtn)
-            task.wait(0.7)
-        end
-
-        inventoryBySlot[slotName] = {}
-        for _, item in pairs(itemsHolder:GetChildren()) do
-            if item:IsA("Frame") and item:GetAttribute("ID") then
-                local id = item:GetAttribute("ID")
-                local rarity = item:GetAttribute("Rarity") or "Common"
-                local name = item:GetAttribute("Tag") or item.Name
-
-                local isEquipped = false
-                local equipped = item:FindFirstChild("Main") and item.Main:FindFirstChild("Equipped")
-                if equipped then
-                    isEquipped = equipped.Visible
-                end
-
-                local rLower = string.lower(rarity)
-                local isSafe = isEquipped or string.find(rLower, "myth") or string.find(rLower, "divine")
-
-                table.insert(inventoryBySlot[slotName], {
-                    ID = id,
-                    Name = name,
-                    Rarity = rarity,
-                    IsSafe = isSafe
-                })
-
-                totalByRarity[rarity] = (totalByRarity[rarity] or 0) + 1
-            end
-        end
-    end
-
-    local raritiesToPurge = {}
-    for rName, count in pairs(totalByRarity) do
-        local rLower = string.lower(rName)
-        local isProtected = string.find(rLower, "myth") or string.find(rLower, "divine")
-        if count >= threshold and not isProtected then
-            print(string.format("[AUTO PERK] Warning: [%s] has %d items (>= %d) -> will purge", rName, count, threshold))
-            raritiesToPurge[rName] = true
-        end
-    end
-
-    if next(raritiesToPurge) ~= nil then
-        local remote = findPath(ReplicatedStorage, {"Assets", "Remotes", "GET"})
-        if not remote then return end
-        local totalSold = 0
-
-        for _, slotName in ipairs(slots) do
-            local deleteList = {}
-            for _, item in ipairs(inventoryBySlot[slotName] or {}) do
-                if raritiesToPurge[item.Rarity] and not item.IsSafe then
-                    table.insert(deleteList, item.ID)
-                end
-            end
-
-            if #deleteList > 0 then
-                local batchSize = 100
-                for i = 1, #deleteList, batchSize do
-                    local batch = {}
-                    for j = i, math.min(i + batchSize - 1, #deleteList) do
-                        table.insert(batch, deleteList[j])
-                    end
-                    pcall(function()
-                        remote:InvokeServer("S_Equipment", "Delete", "Perk", batch)
-                    end)
-                    task.wait(0.2)
-                end
-                totalSold = totalSold + #deleteList
-                task.wait(0.3)
-            end
-        end
-        print(string.format("[AUTO PERK] Cleaned %d excess perk(s).", totalSold))
-    else
-        print(string.format("[AUTO PERK] Inventory normal: no non-mythic/divine rarity >= %d.", threshold))
-    end
+    -- Đã tắt việc click vào Equipment theo yêu cầu người dùng
+    return
 end
 
 local function startMission(player, difficulty)
@@ -1645,30 +1534,71 @@ local function startMissionFarm()
         task.wait(0.05)
         input:SendKeyEvent(false, code, false, game)
     end
-    -- One Retry request per visible Rewards screen; never retry while leaving.
+    -- Auto Retry & Return-to-Lobby monitor on Rewards screen
     task.spawn(function()
-        local wasVisible = false
-        while active() do
-            task.wait(0.1)
-            local main = path(player, {"PlayerGui", "Interface", "Rewards", "Main"})
+        local function triggerRetryButton(rewards)
+            if not rewards then return false end
+            for _, obj in ipairs(rewards:GetDescendants()) do
+                if obj:IsA("GuiButton") then
+                    local name = obj.Name:lower()
+                    local text = (obj:IsA("TextButton") and obj.Text or ""):lower()
+                    local title = obj:FindFirstChild("Title")
+                    local titleText = (title and title:IsA("TextLabel") and title.Text or ""):lower()
+                    if name:find("retry") or text:find("retry") or titleText:find("retry") or text:find("again") then
+                        pcall(function()
+                            if firesignal then
+                                firesignal(obj.MouseButton1Down)
+                                firesignal(obj.MouseButton1Up)
+                                firesignal(obj.MouseButton1Click)
+                                firesignal(obj.Activated)
+                            elseif getconnections then
+                                for _, c in pairs(getconnections(obj.MouseButton1Click)) do c:Fire() end
+                                for _, c in pairs(getconnections(obj.Activated)) do c:Fire() end
+                            end
+                        end)
+                        return true
+                    end
+                end
+            end
+            return false
+        end
+
+        local retryCount = 0
+        local lastRetryTime = 0
+        while inMission() do
+            task.wait(0.2)
+            local rewards = path(player, {"PlayerGui", "Interface", "Rewards"})
+            local main = rewards and (rewards:FindFirstChild("Main") or rewards)
             local shown = main and isVisible(main) or false
-            if shown and not wasVisible and canFarm() then
-                wasVisible = true
-                task.wait(0.5)
-                -- Give the Rewards tracker time to capture items before Retry hides the UI.
-                -- Do not block farming/Retry indefinitely on HTTP or tooltip failures.
-                local captureDeadline = os.clock() + 4
-                while active() and main.Parent and isVisible(main) and os.clock() < captureDeadline do
+            if shown then
+                -- Wait briefly for Rewards webhook / ledger to capture items
+                local captureDeadline = os.clock() + 3
+                while inMission() and main.Parent and isVisible(main) and os.clock() < captureDeadline do
                     local watcher = env.AutoPrestigeRewardsWatcher
                     if not watcher or watcher.readyMain == main then break end
                     task.wait(0.1)
                 end
-                if canFarm() and main.Parent and isVisible(main) then
+
+                if main.Parent and isVisible(main) then
                     local timer = env.AutoPrestigeLobbyTimer
                     local plan = timer and timer.gradePlan
                     local watcher = env.AutoPrestigeRewardsWatcher
                     local gold = watcher and watcher.balance and watcher.balance()
                     local prestigeGold = timer and timer.prestigeGoldTarget
+                    local boostExpired = timer and goldBoostExpired(timer, player)
+
+                    -- Check if we should return to Lobby instead of retrying
+                    if boostExpired then
+                        print("[AUTO PRESTIGE] Gold Boost expired. Returning to Lobby!")
+                        if stopMissionFarm then stopMissionFarm() end
+                        local post = remote("POST")
+                        if post then pcall(function() post:FireServer("Functions", "Teleport") end) end
+                        local get = remote("GET")
+                        if get then pcall(function() get:InvokeServer("Functions", "Teleport", "Lobby") end) end
+                        task.wait(5)
+                        return
+                    end
+
                     if prestigeGold and not env.AutoPrestigeNotEligible and type(gold) == "number" and gold >= prestigeGold then
                         print("[AUTO PRESTIGE] Prestige Gold target reached (" .. tostring(gold) .. " >= " .. tostring(prestigeGold) .. "). Returning to Lobby!")
                         if stopMissionFarm then stopMissionFarm() end
@@ -1676,8 +1606,10 @@ local function startMissionFarm()
                         if post then pcall(function() post:FireServer("Functions", "Teleport") end) end
                         local get = remote("GET")
                         if get then pcall(function() get:InvokeServer("Functions", "Teleport", "Lobby") end) end
+                        task.wait(5)
                         return
                     end
+
                     local isMaxGrade = plan and (plan.isMaxGrade or (plan.potential and plan.potential >= 15))
                     if not isMaxGrade and plan and type(plan.goldTarget) == "number" and type(gold) == "number"
                         and gold >= plan.goldTarget then
@@ -1687,15 +1619,36 @@ local function startMissionFarm()
                         if post then pcall(function() post:FireServer("Functions", "Teleport") end) end
                         local get = remote("GET")
                         if get then pcall(function() get:InvokeServer("Functions", "Teleport", "Lobby") end) end
+                        task.wait(5)
                         return
                     end
-                    local get = remote("GET")
-                    if get and get:IsA("RemoteFunction") then
-                        local ok, err = pcall(function() get:InvokeServer("Functions", "Retry", "Add") end)
-                        if not ok then warn("[AUTO PRESTIGE] Retry failed: " .. tostring(err)) end
+
+                    -- If not leaving to Lobby: Send Retry (retry every 1.5s while Rewards is visible)
+                    if os.clock() - lastRetryTime >= 1.5 then
+                        lastRetryTime = os.clock()
+                        retryCount = retryCount + 1
+                        print(string.format("[AUTO PRESTIGE] Rewards screen visible: Gửi yêu cầu Retry lần %d...", retryCount))
+
+                        local get = remote("GET")
+                        if get and get:IsA("RemoteFunction") then
+                            local ok, res = pcall(function() return get:InvokeServer("Functions", "Retry", "Add") end)
+                            if not ok then warn("[AUTO PRESTIGE] GET Retry failed: " .. tostring(res)) end
+                        end
+
+                        local post = remote("POST")
+                        if post then pcall(function() post:FireServer("Functions", "Retry", "Add") end) end
+                        if post then pcall(function() post:FireServer("Functions", "Retry") end) end
+
+                        local clicked = triggerRetryButton(rewards)
+                        if clicked then
+                            print("[AUTO PRESTIGE] Đã kích hoạt nút Retry trên giao diện Rewards!")
+                        end
                     end
                 end
-            elseif not shown then wasVisible = false end
+            else
+                retryCount = 0
+                lastRetryTime = 0
+            end
         end
     end)
     task.spawn(function()
@@ -2128,29 +2081,6 @@ local function purchaseGoldPotion(player)
             return
         end
     end
-    local market = awaitPath(interface, {"Market"})
-    local function marketClick(button, preferredEvent)
-        click(button, preferredEvent)
-    end
-    if not isVisible(market) then
-        marketClick(awaitPath(interface, {"Topbar", "Main", "Categories", "Market", "Interact"}))
-        if not waitForValue(function() return isVisible(market) end) then
-            potionUnavailable("Market did not open")
-            return
-        end
-    end
-    task.wait(1)
-    local gemBoosts = awaitPath(market, {"Main", "Items", "1_Boosts"})
-    for _ = 1, 4 do
-        if gemBoosts.Visible then break end
-        marketClick(awaitPath(market, {"Main", "Currency_Swap"}), "MouseButton1Click")
-        task.wait(1)
-    end
-    if not (gemBoosts.Visible and isVisible(market)) then
-        potionUnavailable("Gem Boosts Shop (1_Boosts) unavailable")
-        return
-    end
-
     local topbar = require(ReplicatedStorage.Modules["User Interface"].Topbar)
     local function getGems()
         for _, entry in pairs(topbar.Objects) do
@@ -2165,13 +2095,6 @@ local function purchaseGoldPotion(player)
     end
 
     local balance = getGems()
-    if not balance then
-        local held = findPath(market, {"Main", "Held"})
-        local label = held and findPath(held, {"Amount"})
-        local text = label and label.Text:gsub("<[^>]*>", ""):gsub(",", ""):gsub("%s", "")
-        balance = text and text:match("^%d+$") and tonumber(text)
-    end
-
     if not (balance and balance >= 0 and balance < math.huge) then
         potionUnavailable("Exact Gems balance unavailable")
         return
@@ -2250,7 +2173,6 @@ end
 -- always close the Market panel it opened so Equipment/Create stays clickable.
 local function ensureGoldPotion(player)
     local ok, result = pcall(purchaseGoldPotion, player)
-    closePanel(player, "Market")
     if not ok then
         potionUnavailable("Gold Potion step stopped: " .. tostring(result))
         result = nil
