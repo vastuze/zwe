@@ -204,11 +204,8 @@ local function startLobbyTimer()
                 timer.reason = "Prestige Gold target reached"
                 break
             end
-            if gradeGoldTarget and type(gold) == "number" and gold >= gradeGoldTarget then
-                timer.reason = "Enough Gold for Grade " .. tostring(plan and plan.targetGrade or "Next")
-                break
-            end
-            task.wait(0.5)
+            -- Lưu ý: Việc kiểm tra đủ Vàng nâng Grade CHỈ thực hiện tại màn hình Rewards cuối trận, không được ngắt trận giữa chừng.
+            task.wait(1)
         end
         while env.AutoPrestigeLobbyTimer == timer and inMission() do
             timer.leaving = true
@@ -419,8 +416,54 @@ local function upgradeAll(player, interface, equipment, values)
 
     -- Cập nhật lại giao diện Topbar & Title trên màn hình của game
     if lastData then
+        -- 1. Tính toán Potential trực tiếp từ cấp độ 8 chỉ số của serverData
+        local weapon = lastData.Weapon or (lastData.Slots and lastData.Current_Slot and lastData.Slots[lastData.Current_Slot] and lastData.Slots[lastData.Current_Slot].Weapon) or "ODM"
+        local upTable = lastData.Upgrades and lastData.Upgrades[weapon]
+            or (lastData.Slots and lastData.Current_Slot and lastData.Slots[lastData.Current_Slot] and lastData.Slots[lastData.Current_Slot].Upgrades and lastData.Slots[lastData.Current_Slot].Upgrades[weapon])
+        if upTable then
+            local minLvl = 15
+            for _, stat in ipairs(statsList) do
+                local lvl = tonumber(upTable[stat]) or 0
+                if lvl < minLvl then minLvl = lvl end
+            end
+            newPotential = minLvl
+            print(string.format("[AUTO PRESTIGE] Potential tinh tu 8 chi so: %d -> [%s GRADE]", newPotential, values.Pot_Tags[newPotential] or "?"))
+        end
+
+        -- 2. Thử gọi Shared.Get_Potential nếu chưa có
+        if not newPotential then
+            pcall(function()
+                local SharedModule = ReplicatedStorage:FindFirstChild("Modules")
+                    and ReplicatedStorage.Modules:FindFirstChild("Shared")
+                    and ReplicatedStorage.Modules.Shared:FindFirstChild("Shared")
+                if SharedModule then
+                    local Shared = require(SharedModule)
+                    local pot = Shared.Get_Potential(nil, player, lastData)
+                    if type(pot) == "number" then newPotential = pot end
+                end
+            end)
+        end
+
+        -- 3. Cập nhật số dư vàng thực tế sau khi nâng cấp vào file rewards_gold
+        local remainingGold = lastData.Gold
+            or (lastData.Currency and type(lastData.Currency.Gold) == "number" and lastData.Currency.Gold)
+            or (lastData.Slots and lastData.Current_Slot and lastData.Slots[lastData.Current_Slot] and lastData.Slots[lastData.Current_Slot].Currency and lastData.Slots[lastData.Current_Slot].Currency.Gold)
+        if type(remainingGold) == "number" and type(writefile) == "function" then
+            pcall(function()
+                local goldFile = "rewards_gold_" .. tostring(game.GameId) .. "_" .. tostring(player.UserId) .. ".json"
+                local gData = {
+                    userId = player.UserId,
+                    gameId = game.GameId,
+                    balance = remainingGold,
+                    gems = lastData.Gems or (lastData.Currency and lastData.Currency.Gems)
+                }
+                writefile(goldFile, game:GetService("HttpService"):JSONEncode(gData))
+                print(string.format("[AUTO PRESTIGE] Da cap nhat so du Vang sau khi nang cap: %s", tostring(remainingGold)))
+            end)
+        end
+
+        -- 4. Cập nhật UI Topbar & Equipment Title
         pcall(function()
-            -- 1. Refresh Topbar (cập nhật số vàng hiển thị trên màn hình)
             local TopbarModule = ReplicatedStorage:FindFirstChild("Modules") 
                 and ReplicatedStorage.Modules:FindFirstChild("User Interface")
                 and ReplicatedStorage.Modules["User Interface"]:FindFirstChild("Topbar")
@@ -431,21 +474,13 @@ local function upgradeAll(player, interface, equipment, values)
                 end
             end
 
-            -- 2. Cập nhật Title Grade trên giao diện Equipment
-            local SharedModule = ReplicatedStorage:FindFirstChild("Modules")
-                and ReplicatedStorage.Modules:FindFirstChild("Shared")
-                and ReplicatedStorage.Modules.Shared:FindFirstChild("Shared")
-            if SharedModule then
-                local Shared = require(SharedModule)
-                newPotential = Shared.Get_Potential(nil, player, lastData)
-                if newPotential and values.Pot_Tags[newPotential] then
-                    local gradeTag = values.Pot_Tags[newPotential]
-                    print(string.format("[AUTO PRESTIGE] Current Grade after upgrade: [%s GRADE]", gradeTag))
+            if newPotential and values.Pot_Tags[newPotential] then
+                local gradeTag = values.Pot_Tags[newPotential]
+                print(string.format("[AUTO PRESTIGE] Current Grade after upgrade: [%s GRADE]", gradeTag))
 
-                    local title = findPath(equipment, {"Categories", "Upgrades", "Main", "Title"})
-                    if title then
-                        title.Text = "UPGRADES [" .. gradeTag .. " GRADE]"
-                    end
+                local title = findPath(equipment, {"Categories", "Upgrades", "Main", "Title"})
+                if title then
+                    title.Text = "UPGRADES [" .. gradeTag .. " GRADE]"
                 end
             end
         end)
@@ -1345,14 +1380,27 @@ watcher.send = send
 watcher.details = matchDetails
 watcher.balance = function() return goldLedger.balance, goldLedger.gems end
 watcher.refreshBalance = function()
-    local topbar = require(ReplicatedStorage.Modules["User Interface"].Topbar)
-    for _, entry in pairs(topbar.Objects) do
-        local amount = entry.Object and entry.Object:GetAttribute("New")
-        if entry.Module == "Topbar" and validBalance(amount) then
-            if entry.Currency == "Gold" then goldLedger.balance = amount end
-            if entry.Currency == "Gems" then goldLedger.gems = amount end
+    pcall(function()
+        local topbar = require(ReplicatedStorage.Modules["User Interface"].Topbar)
+        for _, entry in pairs(topbar.Objects) do
+            local amount = entry.Object and entry.Object:GetAttribute("New")
+            if entry.Module == "Topbar" and validBalance(amount) then
+                if entry.Currency == "Gold" then goldLedger.balance = amount end
+                if entry.Currency == "Gems" then goldLedger.gems = amount end
+            end
         end
-    end
+    end)
+    pcall(function()
+        local gui = player:FindFirstChild("PlayerGui")
+        local interface = gui and gui:FindFirstChild("Interface")
+        local amountNode = childPath(interface, {"Topbar", "Main", "Currencies", "Gold", "Amount"})
+        if amountNode and amountNode.Text ~= "" then
+            local val = parseNumber(amountNode.Text)
+            if validBalance(val) then
+                goldLedger.balance = val
+            end
+        end
+    end)
     saveGold()
 end
 print("[WEBHOOK] Client da chay; cho ket thuc tran / Rewards.")
@@ -1693,7 +1741,7 @@ local function startMissionFarm()
                     local isMaxGrade = plan and (plan.isMaxGrade or (plan.potential and plan.potential >= 15))
                     if not isMaxGrade and plan and type(plan.goldTarget) == "number" and type(gold) == "number"
                         and gold >= plan.goldTarget then
-                        print("[AUTO PRESTIGE] Enough Gold for " .. tostring(plan.targetGrade or "next grade") .. " (" .. tostring(gold) .. " >= " .. tostring(plan.goldTarget) .. "). Returning to Lobby!")
+                        print("[AUTO PRESTIGE] ĐỦ VÀNG để lên Grade " .. tostring(plan.targetGrade or "kế tiếp") .. " (" .. tostring(gold) .. " >= " .. tostring(plan.goldTarget) .. "). Quay về Lobby nâng cấp!")
                         if stopMissionFarm then stopMissionFarm() end
                         local post = remote("POST")
                         if post then pcall(function() post:FireServer("Functions", "Teleport") end) end
@@ -1701,6 +1749,11 @@ local function startMissionFarm()
                         if get then pcall(function() get:InvokeServer("Functions", "Teleport", "Lobby") end) end
                         task.wait(5)
                         return
+                    else
+                        if plan and plan.goldTarget then
+                            print(string.format("[AUTO PRESTIGE] Vàng hiện có: %s / %s (để lên %s). Chưa đủ vàng -> Tiếp tục Retry!",
+                                tostring(gold or 0), tostring(plan.goldTarget), tostring(plan.targetGrade or "Next")))
+                        end
                     end
 
                     -- If not leaving to Lobby: Send Retry (retry every 1.5s while Rewards is visible)
