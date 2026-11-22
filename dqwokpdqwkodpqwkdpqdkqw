@@ -382,9 +382,9 @@ local function upgradeAll(player, interface, equipment, values)
     for i = 1, 120 do
         -- Sắp xếp ưu tiên chỉ số cấp thấp hơn nếu có dữ liệu
         if lastData then
-            local weapon = lastData.Weapon or (lastData.Slots and lastData.Current_Slot and lastData.Slots[lastData.Current_Slot] and lastData.Slots[lastData.Current_Slot].Weapon) or "ODM"
-            local upTable = lastData.Upgrades and lastData.Upgrades[weapon]
-                or (lastData.Slots and lastData.Current_Slot and lastData.Slots[lastData.Current_Slot] and lastData.Slots[lastData.Current_Slot].Upgrades and lastData.Slots[lastData.Current_Slot].Upgrades[weapon])
+            local weapon = lastData.Weapon or (lastData.Slots and lastData.Current_Slot and lastData.Slots[lastData.Current_Slot] and lastData.Slots[lastData.Current_Slot].Weapon) or "Blades"
+            local upTable = (lastData.Upgrades and (lastData.Upgrades[weapon] or lastData.Upgrades["Blades"] or lastData.Upgrades["Spears"]))
+                or (lastData.Slots and lastData.Current_Slot and lastData.Slots[lastData.Current_Slot] and lastData.Slots[lastData.Current_Slot].Upgrades and (lastData.Slots[lastData.Current_Slot].Upgrades[weapon] or lastData.Slots[lastData.Current_Slot].Upgrades["Blades"]))
             if upTable then
                 table.sort(statsList, function(a, b)
                     return (upTable[a] or 0) < (upTable[b] or 0)
@@ -417,9 +417,9 @@ local function upgradeAll(player, interface, equipment, values)
     -- Cập nhật lại giao diện Topbar & Title trên màn hình của game
     if lastData then
         -- 1. Tính toán Potential trực tiếp từ cấp độ 8 chỉ số của serverData
-        local weapon = lastData.Weapon or (lastData.Slots and lastData.Current_Slot and lastData.Slots[lastData.Current_Slot] and lastData.Slots[lastData.Current_Slot].Weapon) or "ODM"
-        local upTable = lastData.Upgrades and lastData.Upgrades[weapon]
-            or (lastData.Slots and lastData.Current_Slot and lastData.Slots[lastData.Current_Slot] and lastData.Slots[lastData.Current_Slot].Upgrades and lastData.Slots[lastData.Current_Slot].Upgrades[weapon])
+        local weapon = lastData.Weapon or (lastData.Slots and lastData.Current_Slot and lastData.Slots[lastData.Current_Slot] and lastData.Slots[lastData.Current_Slot].Weapon) or "Blades"
+        local upTable = (lastData.Upgrades and (lastData.Upgrades[weapon] or lastData.Upgrades["Blades"] or lastData.Upgrades["Spears"]))
+            or (lastData.Slots and lastData.Current_Slot and lastData.Slots[lastData.Current_Slot] and lastData.Slots[lastData.Current_Slot].Upgrades and (lastData.Slots[lastData.Current_Slot].Upgrades[weapon] or lastData.Slots[lastData.Current_Slot].Upgrades["Blades"]))
         if upTable then
             local minLvl = 15
             for _, stat in ipairs(statsList) do
@@ -560,8 +560,8 @@ local function readDifficulty(player)
     end
 
     local beforeGrade = savedPlan and savedPlan.currentGrade
-    local gradeIndex = savedPlan and type(savedPlan.potential) == "number" and savedPlan.potential or nil
-    local grade = gradeIndex and values.Pot_Tags[gradeIndex] or beforeGrade
+    local gradeIndex = nil
+    local grade = nil
 
     -- 2. Thử nâng cấp trang bị bằng Remote
     local gui = findPath(player, {"PlayerGui"})
@@ -575,7 +575,59 @@ local function readDifficulty(player)
         print(string.format("[AUTO PRESTIGE] Grade updated via Remote: [%s GRADE] (Pot %d)", grade, gradeIndex))
     end
 
-    -- 3. Nếu chưa có gradeIndex từ Remote, thử lấy từ Shared hoặc Module game
+    -- 3. Nếu chưa có gradeIndex từ Remote (do chưa đủ tiền nâng hoặc 0 nâng cấp):
+    -- Thử đọc trực tiếp dữ liệu vũ khí từ Module Core.Update
+    if not gradeIndex then
+        pcall(function()
+            local UpdateModule = ReplicatedStorage:FindFirstChild("Modules")
+                and ReplicatedStorage.Modules:FindFirstChild("Core")
+                and ReplicatedStorage.Modules.Core:FindFirstChild("Update")
+            if UpdateModule then
+                local Update = require(UpdateModule)
+                local _, liveData = Update.Get_Data(nil, true)
+                if liveData then
+                    local weapon = liveData.Weapon or (liveData.Slots and liveData.Current_Slot and liveData.Slots[liveData.Current_Slot] and liveData.Slots[liveData.Current_Slot].Weapon) or "Blades"
+                    local upTable = (liveData.Upgrades and (liveData.Upgrades[weapon] or liveData.Upgrades["Blades"] or liveData.Upgrades["Spears"]))
+                        or (liveData.Slots and liveData.Current_Slot and liveData.Slots[liveData.Current_Slot] and liveData.Slots[liveData.Current_Slot].Upgrades and (liveData.Slots[liveData.Current_Slot].Upgrades[weapon] or liveData.Slots[liveData.Current_Slot].Upgrades["Blades"]))
+                    if upTable then
+                        local statsList = {
+                            "Blade_Durability", "ODM_Gas", "ODM_Range", "ODM_Control",
+                            "ODM_Speed", "Crit_Damage", "Crit_Chance", "ODM_Damage"
+                        }
+                        local minLvl = 15
+                        local found = false
+                        for _, stat in ipairs(statsList) do
+                            if upTable[stat] ~= nil then
+                                found = true
+                                local lvl = tonumber(upTable[stat]) or 0
+                                if lvl < minLvl then minLvl = lvl end
+                            end
+                        end
+                        if found and minLvl < 15 then
+                            gradeIndex = minLvl
+                            grade = values.Pot_Tags[gradeIndex]
+                            print(string.format("[AUTO PRESTIGE] Grade detected from live weapon stats: [%s GRADE] (Pot %d)", grade, gradeIndex))
+                        end
+                    end
+                    if not gradeIndex then
+                        local SharedModule = ReplicatedStorage:FindFirstChild("Modules")
+                            and ReplicatedStorage.Modules:FindFirstChild("Shared")
+                            and ReplicatedStorage.Modules.Shared:FindFirstChild("Shared")
+                        if SharedModule then
+                            local Shared = require(SharedModule)
+                            local pot = Shared.Get_Potential(nil, player, liveData)
+                            if type(pot) == "number" and values.Pot_Tags[pot] then
+                                gradeIndex = pot
+                                grade = values.Pot_Tags[pot]
+                                print(string.format("[AUTO PRESTIGE] Grade detected from Shared.Get_Potential(liveData): [%s GRADE] (Pot %d)", grade, gradeIndex))
+                            end
+                        end
+                    end
+                end
+            end
+        end)
+    end
+
     if not gradeIndex then
         pcall(function()
             local SharedModule = ReplicatedStorage:FindFirstChild("Modules")
@@ -588,6 +640,7 @@ local function readDifficulty(player)
                 if pot and values.Pot_Tags[pot] then
                     gradeIndex = pot
                     grade = values.Pot_Tags[pot]
+                    print(string.format("[AUTO PRESTIGE] Grade detected from Shared.Get_Potential: [%s GRADE] (Pot %d)", grade, gradeIndex))
                 end
             end
         end)
@@ -603,11 +656,13 @@ local function readDifficulty(player)
                 if eq and type(eq.Potential) == "number" and values.Pot_Tags[eq.Potential] then
                     gradeIndex = eq.Potential
                     grade = values.Pot_Tags[gradeIndex]
+                    print(string.format("[AUTO PRESTIGE] Grade detected from Equipment Module: [%s GRADE] (Pot %d)", grade, gradeIndex))
                 end
             end
         end)
     end
 
+    -- Thử đọc từ UI Equipment Title (ví dụ: UPGRADES [B GRADE] hoặc UPGRADES [A- GRADE])
     if not gradeIndex and equipment then
         pcall(function()
             local title = findPath(equipment, {"Categories", "Upgrades", "Main", "Title"})
@@ -621,6 +676,7 @@ local function readDifficulty(player)
                         if potTag == tag then
                             gradeIndex = index
                             grade = tag
+                            print(string.format("[AUTO PRESTIGE] Grade detected from UI Title: [%s GRADE] (Pot %d)", grade, gradeIndex))
                             break
                         end
                     end
@@ -629,7 +685,35 @@ local function readDifficulty(player)
         end)
     end
 
-    -- 4. Nếu vẫn chưa có grade, dùng fallback an toàn - KHÔNG BAO GIỜ ĐƯỢC DỪNG BOT
+    -- Thử đọc từ UI Stat Current
+    if not gradeIndex and equipment then
+        pcall(function()
+            local cur = findPath(equipment, {"Stat", "Inner", "Upgrade_Values", "Current"})
+            if cur and cur.Text ~= "" then
+                local text = cur.Text:gsub("<[^>]*>", ""):upper()
+                local tag = text:match("%[([A-S][%+%-]?)%]")
+                if tag then
+                    for index, potTag in pairs(values.Pot_Tags) do
+                        if potTag == tag then
+                            gradeIndex = index
+                            grade = tag
+                            print(string.format("[AUTO PRESTIGE] Grade detected from UI Stat Current: [%s GRADE] (Pot %d)", grade, gradeIndex))
+                            break
+                        end
+                    end
+                end
+            end
+        end)
+    end
+
+    -- 4. Nếu chưa phát hiện live, dùng lại plan đã lưu trước đó
+    if not gradeIndex and savedPlan and type(savedPlan.potential) == "number" then
+        gradeIndex = savedPlan.potential
+        grade = values.Pot_Tags[gradeIndex] or savedPlan.currentGrade
+        print(string.format("[AUTO PRESTIGE] Grade restored from saved plan: [%s GRADE] (Pot %d)", tostring(grade), gradeIndex))
+    end
+
+    -- 5. Fallback an toàn nếu lần đầu chạy chưa có dữ liệu gì: mặc định Grade B (Pot 10)
     if not gradeIndex or not grade then
         if beforeGrade and values.Pot_Tags then
             for index, potTag in pairs(values.Pot_Tags) do
@@ -643,9 +727,9 @@ local function readDifficulty(player)
     end
 
     if not gradeIndex or not grade then
-        warn("[AUTO PRESTIGE] Grade could not be detected; using default Grade C (Potential 7) to continue mission farm.")
-        gradeIndex = 7
-        grade = values.Pot_Tags[7] or "C"
+        warn("[AUTO PRESTIGE] Grade could not be detected; using fallback Grade B (Potential 10) to continue mission farm.")
+        gradeIndex = 10
+        grade = values.Pot_Tags[10] or "B"
     end
 
     -- 5. Webhook thông báo nếu có nâng cấp
