@@ -603,10 +603,10 @@ local function readDifficulty(player)
                                 if lvl < minLvl then minLvl = lvl end
                             end
                         end
-                        if found and minLvl < 15 then
+                        if found then
                             gradeIndex = minLvl
-                            grade = values.Pot_Tags[gradeIndex]
-                            print(string.format("[AUTO PRESTIGE] Grade detected from live weapon stats: [%s GRADE] (Pot %d)", grade, gradeIndex))
+                            grade = values.Pot_Tags[gradeIndex] or (minLvl >= 15 and "S-")
+                            print(string.format("[AUTO PRESTIGE] Grade detected from live weapon stats: [%s GRADE] (Pot %d)", tostring(grade), gradeIndex))
                         end
                     end
                     if not gradeIndex then
@@ -685,14 +685,15 @@ local function readDifficulty(player)
         end)
     end
 
-    -- Thử đọc từ UI Stat Current
+    -- Thử đọc từ UI Stat Current (chỉ đọc nếu Stat panel đang thực sự mở và có tên stat, tránh đọc placeholder [E-] khi UI chưa chọn)
     if not gradeIndex and equipment then
         pcall(function()
+            local statName = findPath(equipment, {"Stat", "Inner", "Stat"})
             local cur = findPath(equipment, {"Stat", "Inner", "Upgrade_Values", "Current"})
-            if cur and cur.Text ~= "" then
+            if cur and cur.Text ~= "" and statName and statName.Text ~= "" then
                 local text = cur.Text:gsub("<[^>]*>", ""):upper()
                 local tag = text:match("%[([A-S][%+%-]?)%]")
-                if tag then
+                if tag and tag ~= "E-" then
                     for index, potTag in pairs(values.Pot_Tags) do
                         if potTag == tag then
                             gradeIndex = index
@@ -794,6 +795,25 @@ local function tryPrestige(player)
                 if text == rank.Tag:upper() then return index end
             end
         end
+        -- Thử đọc Rank / Prestige từ Module Core.Update
+        local rankFromData = nil
+        pcall(function()
+            local UpdateModule = ReplicatedStorage:FindFirstChild("Modules")
+                and ReplicatedStorage.Modules:FindFirstChild("Core")
+                and ReplicatedStorage.Modules.Core:FindFirstChild("Update")
+            if UpdateModule then
+                local Update = require(UpdateModule)
+                local _, liveData = Update.Get_Data(nil, true)
+                if liveData then
+                    local pRank = liveData.Rank or liveData.Prestige
+                        or (liveData.Slots and liveData.Current_Slot and liveData.Slots[liveData.Current_Slot] and (liveData.Slots[liveData.Current_Slot].Rank or liveData.Slots[liveData.Current_Slot].Prestige))
+                    if type(pRank) == "number" then
+                        rankFromData = pRank
+                    end
+                end
+            end
+        end)
+        if rankFromData then return rankFromData end
         local saved = env.AutoPrestigeRank
         if saved and type(saved.rank) == "number" then return saved.rank end
         return nil
