@@ -154,18 +154,48 @@ end
 
 local function prestigeTarget(player)
     local env = type(getgenv) == "function" and getgenv() or _G
-    local saved = env.AutoPrestigeRank
-    if type(readfile) == "function" then
-        local ok, value = pcall(function()
-            return game:GetService("HttpService"):JSONDecode(readfile(prestigeFile(player)))
-        end)
-        if ok then saved = value end
+    local rank = nil
+    -- 1. Ưu tiên đọc rank từ liveData Core.Update
+    pcall(function()
+        local UpdateModule = ReplicatedStorage:FindFirstChild("Modules")
+            and ReplicatedStorage.Modules:FindFirstChild("Core")
+            and ReplicatedStorage.Modules.Core:FindFirstChild("Update")
+        if UpdateModule then
+            local Update = require(UpdateModule)
+            local _, liveData = Update.Get_Data({Cache = {Player = player}}, true)
+            if liveData then
+                local prog = liveData.Progression
+                    or (liveData.Slots and liveData.Current_Slot and liveData.Slots[liveData.Current_Slot] and liveData.Slots[liveData.Current_Slot].Progression)
+                if prog and type(prog.Prestige) == "number" then
+                    rank = prog.Prestige
+                elseif prog and type(prog.Rank) == "number" then
+                    rank = prog.Rank
+                end
+            end
+        end
+    end)
+    -- 2. Nếu chưa có, đọc từ file / env đã lưu
+    if rank == nil then
+        local saved = env.AutoPrestigeRank
+        if type(readfile) == "function" then
+            local ok, value = pcall(function()
+                return game:GetService("HttpService"):JSONDecode(readfile(prestigeFile(player)))
+            end)
+            if ok then saved = value end
+        end
+        if type(saved) == "table" and saved.userId == player.UserId and saved.gameId == game.GameId
+            and type(saved.rank) == "number" then
+            rank = saved.rank
+        end
     end
-    if type(saved) == "table" and saved.userId == player.UserId and saved.gameId == game.GameId
-        and type(saved.rank) == "number" and saved.rank >= 0 and saved.rank < 5 then
-        local target = configuredPrestigeGold(saved.rank)
-        if type(target) == "number" and target >= 0 then return target end
+    if rank == nil then rank = 0 end
+    if type(rank) == "number" and rank >= 0 and rank < 5 then
+        local target = configuredPrestigeGold(rank)
+        if type(target) == "number" and target >= 0 then
+            return target, rank
+        end
     end
+    return nil, rank
 end
 local lobbyPlaces = {[4658598196] = 14916516914, [5310627045] = 15393230099}
 local missionPlaces = {
@@ -647,7 +677,7 @@ local function readDifficulty(player)
                 and ReplicatedStorage.Modules.Core:FindFirstChild("Update")
             if UpdateModule then
                 local Update = require(UpdateModule)
-                local _, liveData = Update.Get_Data(nil, true)
+                local _, liveData = Update.Get_Data({Cache = {Player = player}}, true)
                 if liveData then
                     local weapon = liveData.Weapon or (liveData.Slots and liveData.Current_Slot and liveData.Slots[liveData.Current_Slot] and liveData.Slots[liveData.Current_Slot].Weapon) or "Blades"
                     local upTable = (liveData.Upgrades and (liveData.Upgrades[weapon] or liveData.Upgrades["Blades"] or liveData.Upgrades["Spears"]))
@@ -845,20 +875,10 @@ end
 local function tryPrestige(player)
     local env = type(getgenv) == "function" and getgenv() or _G
     env.AutoPrestigeNotEligible = nil
-    local interface = awaitPath(player, {"PlayerGui", "Interface"})
-    local equipment = findPath(interface, {"Equipment"})
     local ranks = require(ReplicatedStorage.Modules.Storage.Ranks)
 
     local function readRank()
-        local label = equipment and findPath(equipment, {"Prestige", "Progress", "Title"})
-        if label and label.Text ~= "" then
-            local text = label.Text:gsub("<[^>]*>", ""):upper():match("^%s*(.-)%s*$")
-            if text == "ENLIST" then return 0 end
-            for index, rank in pairs(ranks) do
-                if text == rank.Tag:upper() then return index end
-            end
-        end
-        -- Thử đọc Rank / Prestige từ Module Core.Update
+        -- 1. Ưu tiên đọc trực tiếp từ Core.Update
         local rankFromData = nil
         pcall(function()
             local UpdateModule = ReplicatedStorage:FindFirstChild("Modules")
@@ -866,9 +886,10 @@ local function tryPrestige(player)
                 and ReplicatedStorage.Modules.Core:FindFirstChild("Update")
             if UpdateModule then
                 local Update = require(UpdateModule)
-                local _, liveData = Update.Get_Data(nil, true)
+                local _, liveData = Update.Get_Data({Cache = {Player = player}}, true)
                 if liveData then
-                    local pRank = liveData.Rank or liveData.Prestige
+                    local pRank = (liveData.Progression and (liveData.Progression.Prestige or liveData.Progression.Rank))
+                        or liveData.Rank or liveData.Prestige
                         or (liveData.Slots and liveData.Current_Slot and liveData.Slots[liveData.Current_Slot] and (liveData.Slots[liveData.Current_Slot].Rank or liveData.Slots[liveData.Current_Slot].Prestige))
                     if type(pRank) == "number" then
                         rankFromData = pRank
@@ -877,9 +898,24 @@ local function tryPrestige(player)
             end
         end)
         if rankFromData then return rankFromData end
+
+        -- 2. Đọc từ UI nếu có
+        local gui = player:FindFirstChild("PlayerGui")
+        local interface = gui and gui:FindFirstChild("Interface")
+        local equipment = interface and interface:FindFirstChild("Equipment")
+        local label = equipment and findPath(equipment, {"Prestige", "Progress", "Title"})
+        if label and label.Text ~= "" then
+            local text = label.Text:gsub("<[^>]*>", ""):upper():match("^%s*(.-)%s*$")
+            if text == "ENLIST" then return 0 end
+            for index, r in pairs(ranks) do
+                if text == r.Tag:upper() then return index end
+            end
+        end
+
+        -- 3. Đọc từ file đã lưu
         local saved = env.AutoPrestigeRank
         if saved and type(saved.rank) == "number" then return saved.rank end
-        return nil
+        return 0
     end
 
     local function saveRank(rank)
@@ -899,15 +935,19 @@ local function tryPrestige(player)
         return
     end
 
-    local topbar = require(ReplicatedStorage.Modules["User Interface"].Topbar)
-    local gold
-    for _, entry in pairs(topbar.Objects) do
-        if entry.Module == "Topbar" and entry.Currency == "Gold" and entry.Object then
-            gold = entry.Object:GetAttribute("New")
+    local gold = nil
+    pcall(function()
+        local topbar = require(ReplicatedStorage.Modules["User Interface"].Topbar)
+        for _, entry in pairs(topbar.Objects) do
+            if entry.Module == "Topbar" and entry.Currency == "Gold" and entry.Object then
+                gold = entry.Object:GetAttribute("New")
+            end
         end
-    end
+    end)
     if type(gold) ~= "number" then
-        local goldLabel = findPath(interface, {"Topbar", "Main", "Currencies", "Gold", "Amount"})
+        local gui = player:FindFirstChild("PlayerGui")
+        local interface = gui and gui:FindFirstChild("Interface")
+        local goldLabel = interface and findPath(interface, {"Topbar", "Main", "Currencies", "Gold", "Amount"})
         local text = goldLabel and goldLabel.Text:gsub("<[^>]*>", ""):gsub(",", ""):gsub("%s", "")
         if text and text:match("^%d+$") then gold = tonumber(text) end
     end
@@ -917,7 +957,7 @@ local function tryPrestige(player)
         print("[AUTO PRESTIGE] P1-P5 configuration complete; skipping further Prestige.")
         return
     end
-    print("[AUTO PRESTIGE] Prestige: P" .. rank .. " | Gold " .. tostring(gold) .. " | Target " .. tostring(target))
+    print("[AUTO PRESTIGE] Prestige: P" .. rank .. " | Gold " .. tostring(gold or 0) .. " | Target " .. tostring(target))
     local currentLvl = readPlayerLevel(player)
     if currentLvl and currentLvl < 100 then
         print(string.format("[AUTO PRESTIGE] Prestige skipped: Level hiện tại %d chưa đạt Level 100.", currentLvl))
@@ -927,17 +967,57 @@ local function tryPrestige(player)
         print("[AUTO PRESTIGE] Prestige skipped: Gold below target or exact balance unavailable.")
         return
     end
+
     -- ========================================================
-    -- THỰC HIỆN PRESTIGE 100% BẰNG REMOTE (KHÔNG CLICK)
+    -- PRESTIGE PURE REMOTE (XỬ LÝ NEXT_TALENTS & CHỐT PRESTIGE)
     -- ========================================================
     print("=======================================================")
-    print("[AUTO PRESTIGE] TIẾN HÀNH PRESTIGE 100% BẰNG REMOTE...")
+    print("[1] KIỂM TRA DỮ LIỆU VÀ PHIÊN ROLL HIỆN TẠI:")
     print("=======================================================")
 
     local Event = ReplicatedStorage:WaitForChild("Assets"):WaitForChild("Remotes"):WaitForChild("GET")
     local Memories = require(ReplicatedStorage:WaitForChild("Modules"):WaitForChild("Storage"):WaitForChild("Memories"))
 
-    -- 1. Tìm Tag chuẩn của Gold Boost
+    -- Lấy dữ liệu PlayerData từ Core.Update
+    local currentData = nil
+    pcall(function()
+        local UpdateModule = ReplicatedStorage:FindFirstChild("Modules")
+            and ReplicatedStorage.Modules:FindFirstChild("Core")
+            and ReplicatedStorage.Modules.Core:FindFirstChild("Update")
+        if UpdateModule then
+            local Update = require(UpdateModule)
+            _, currentData = Update.Get_Data({Cache = {Player = player}}, true)
+        end
+    end)
+
+    if currentData and currentData.Progression then
+        print(string.format("[*] Cấp: %s | Prestige: %s", tostring(currentData.Progression.Level), tostring(currentData.Progression.Prestige)))
+    end
+
+    -- Xác định danh sách Talents: ưu tiên Next_Talents có sẵn -> nếu chưa có mới roll -> fallback 18, 3, 2
+    local talentList = nil
+    if currentData and currentData.Next_Talents and #currentData.Next_Talents > 0 then
+        print("[+] Đã có sẵn Next_Talents từ phiên trước: " .. table.concat(currentData.Next_Talents, ", "))
+        talentList = currentData.Next_Talents
+    else
+        print("[*] Thử gọi Remote 'Talents'...")
+        local ok, resData, rolled = pcall(function()
+            return Event:InvokeServer("S_Equipment", "Talents")
+        end)
+        if ok and type(rolled) == "table" and #rolled > 0 then
+            print("[+] Roll mới thành công: " .. table.concat(rolled, ", "))
+            talentList = rolled
+        else
+            print("[!] Đang có phiên roll cũ đang chờ, sử dụng danh sách: 18, 3, 2")
+            talentList = {"18", "3", "2"}
+        end
+    end
+
+    print("=======================================================")
+    print("[2] DỊCH TÊN THẺ TỪ STORAGE.MEMORIES:")
+    print("=======================================================")
+
+    -- 1. Tìm Tag chuẩn của Gold Boost trong Memories
     local goldBoostTag = "Gold Boost"
     if Memories.Boosts then
         for id, boost in pairs(Memories.Boosts) do
@@ -947,30 +1027,9 @@ local function tryPrestige(player)
             end
         end
     end
-    print("[AUTO PRESTIGE] Chọn Boost: " .. tostring(goldBoostTag))
+    print(" -> Chọn Boost: " .. tostring(goldBoostTag))
 
-    -- 2. Dịch 3 ID đã roll ra thành tên thẻ (Tag)
-    local rolledIDs = {}
-    local root = workspace:FindFirstChild("Objects") 
-        and workspace.Objects:FindFirstChild("Blackout") 
-        and workspace.Objects.Blackout:FindFirstChild("Memories")
-    if root then
-        for _, card in ipairs(root:GetChildren()) do
-            local info = card:FindFirstChild("Holder") 
-                and card.Holder:FindFirstChild("Front")
-                and card.Holder.Front:FindFirstChild("Main")
-                and card.Holder.Front.Main:FindFirstChild("Inner")
-                and card.Holder.Front.Main.Inner:FindFirstChild("Info")
-            if info and info:GetAttribute("Category") == "Talents" then
-                table.insert(rolledIDs, card.Name)
-            end
-        end
-    end
-    if #rolledIDs == 0 then
-        rolledIDs = {"18", "3", "2"}
-    end
-
-    local talentTags = {}
+    -- 2. Dịch ID Talent sang tên hiển thị (Tag)
     local function getTalentInfo(id)
         local strId = tostring(id)
         local numId = tonumber(id)
@@ -983,30 +1042,43 @@ local function tryPrestige(player)
         return tostring(id), "Unknown", 1
     end
 
-    for _, id in ipairs(rolledIDs) do
+    local talentOptions = {}
+    print("   --- 3 THẺ TALENT ---")
+    for _, id in ipairs(talentList) do
         local tag, rarity, stars = getTalentInfo(id)
-        table.insert(talentTags, {ID = id, Tag = tag})
-        print(string.format("[AUTO PRESTIGE] [Talent] ID %s -> Tag: '%s' (%s, %d sao)", tostring(id), tag, rarity, stars or 1))
+        table.insert(talentOptions, {ID = id, Tag = tag})
+        print(string.format("   [Talent] ID %s -> Tag: '%s' (%s, %d sao)", tostring(id), tag, rarity, stars or 1))
     end
 
-    local picked = talentTags[1]
-    print(string.format("[AUTO PRESTIGE] [★] CHỌN THẺ ĐỂ PRESTIGE: '%s' (ID %s)", picked.Tag, picked.ID))
+    -- Chọn thẻ đầu tiên
+    local picked = talentOptions[1]
+    print(string.format("[★] ĐÃ CHỌN THẺ: '%s' (ID %s)", picked.Tag, tostring(picked.ID)))
+
+    print("=======================================================")
+    print("[3] GỬI REMOTE PRESTIGE CHỐT DỮ LIỆU:")
+    print("=======================================================")
 
     local selection = {
         ["Boosts"] = goldBoostTag,
         ["Talents"] = picked.Tag
     }
 
-    print(string.format("[AUTO PRESTIGE] Gửi Remote: Boosts = '%s' | Talents = '%s'...", selection.Boosts, selection.Talents))
-
+    print(string.format("[*] Thử 1: Gửi Tag -> Boosts = '%s' | Talents = '%s'...", selection.Boosts, selection.Talents))
     local ok, finalData, skillPoints, rankId = pcall(function()
         return Event:InvokeServer("S_Equipment", "Prestige", selection)
     end)
 
-    -- Dự phòng: Nếu Server muốn nhận ID dạng số thay vì chữ
-    if ok and finalData == nil then
-        print("[AUTO PRESTIGE] Thử lại phương án 2: Gửi ID thay vì Tag...")
+    if not ok or not finalData then
+        print("[!] Thử 1 thất bại, thử 2: Gửi ID Talents...")
         selection.Talents = tostring(picked.ID)
+        ok, finalData, skillPoints, rankId = pcall(function()
+            return Event:InvokeServer("S_Equipment", "Prestige", selection)
+        end)
+    end
+
+    if not ok or not finalData then
+        print("[!] Thử 2 thất bại, thử 3: Gửi Boosts = '1'...")
+        selection.Boosts = "1"
         ok, finalData, skillPoints, rankId = pcall(function()
             return Event:InvokeServer("S_Equipment", "Prestige", selection)
         end)
@@ -1460,6 +1532,26 @@ local function boostsText()
 end
 
 local function prestigeText()
+    local rank = nil
+    pcall(function()
+        local UpdateModule = ReplicatedStorage:FindFirstChild("Modules")
+            and ReplicatedStorage.Modules:FindFirstChild("Core")
+            and ReplicatedStorage.Modules.Core:FindFirstChild("Update")
+        if UpdateModule then
+            local Update = require(UpdateModule)
+            local _, liveData = Update.Get_Data({Cache = {Player = player}}, true)
+            if liveData then
+                local prog = liveData.Progression
+                    or (liveData.Slots and liveData.Current_Slot and liveData.Slots[liveData.Current_Slot] and liveData.Slots[liveData.Current_Slot].Progression)
+                if prog and type(prog.Prestige) == "number" then
+                    rank = prog.Prestige
+                elseif prog and type(prog.Rank) == "number" then
+                    rank = prog.Rank
+                end
+            end
+        end
+    end)
+    if rank ~= nil then return tostring(rank) end
     local saved = configEnv.AutoPrestigeRank
     if type(saved) ~= "table" and type(readfile) == "function" then
         local ok, value = pcall(function()
@@ -1472,11 +1564,51 @@ local function prestigeText()
         and saved.rank % 1 == 0 then
         return tostring(saved.rank)
     end
-    return "Chua xac nhan Prestige tai Lobby"
+    return "0"
 end
 
 local function getPlayerGradeText()
     local env = type(getgenv) == "function" and getgenv() or _G
+    local values = nil
+    pcall(function() values = require(ReplicatedStorage.Modules.Storage.Values) end)
+
+    -- 1. Đọc trực tiếp từ Core.Update 8 chỉ số vũ khí
+    local liveGrade = nil
+    pcall(function()
+        local UpdateModule = ReplicatedStorage:FindFirstChild("Modules")
+            and ReplicatedStorage.Modules:FindFirstChild("Core")
+            and ReplicatedStorage.Modules.Core:FindFirstChild("Update")
+        if UpdateModule then
+            local Update = require(UpdateModule)
+            local _, liveData = Update.Get_Data({Cache = {Player = player}}, true)
+            if liveData then
+                local weapon = liveData.Weapon or (liveData.Slots and liveData.Current_Slot and liveData.Slots[liveData.Current_Slot] and liveData.Slots[liveData.Current_Slot].Weapon) or "Blades"
+                local upTable = (liveData.Upgrades and (liveData.Upgrades[weapon] or liveData.Upgrades["Blades"] or liveData.Upgrades["Spears"]))
+                    or (liveData.Slots and liveData.Current_Slot and liveData.Slots[liveData.Current_Slot] and liveData.Slots[liveData.Current_Slot].Upgrades and (liveData.Slots[liveData.Current_Slot].Upgrades[weapon] or liveData.Slots[liveData.Current_Slot].Upgrades["Blades"]))
+                if upTable then
+                    local statsList = {
+                        "Blade_Durability", "ODM_Gas", "ODM_Range", "ODM_Control",
+                        "ODM_Speed", "Crit_Damage", "Crit_Chance", "ODM_Damage"
+                    }
+                    local minLvl = 15
+                    local found = false
+                    for _, stat in ipairs(statsList) do
+                        if upTable[stat] ~= nil then
+                            found = true
+                            local lvl = tonumber(upTable[stat]) or 0
+                            if lvl < minLvl then minLvl = lvl end
+                        end
+                    end
+                    if found then
+                        liveGrade = (values and values.Pot_Tags and values.Pot_Tags[minLvl]) or (minLvl >= 15 and "S-")
+                    end
+                end
+            end
+        end
+    end)
+    if liveGrade and liveGrade ~= "" then return liveGrade end
+
+    -- 2. Thử từ plan đã lưu
     local plan = env.AutoPrestigeGradePlan
     if not plan and type(readfile) == "function" then
         local planFile = "auto_prestige_grade_" .. tostring(game.GameId) .. "_" .. tostring(player.UserId) .. ".json"
@@ -1488,11 +1620,8 @@ local function getPlayerGradeText()
     end
     if plan then
         if plan.currentGrade and plan.currentGrade ~= "" then return plan.currentGrade end
-        if plan.potential then
-            local values = require(ReplicatedStorage.Modules.Storage.Values)
-            if values and values.Pot_Tags and values.Pot_Tags[plan.potential] then
-                return values.Pot_Tags[plan.potential]
-            end
+        if plan.potential and values and values.Pot_Tags and values.Pot_Tags[plan.potential] then
+            return values.Pot_Tags[plan.potential]
         end
     end
     return "S-"
@@ -1917,7 +2046,6 @@ local function startMissionFarm()
                     local plan = timer and timer.gradePlan
                     local watcher = env.AutoPrestigeRewardsWatcher
                     local gold = watcher and watcher.balance and watcher.balance()
-                    local prestigeGold = timer and timer.prestigeGoldTarget
                     local boostExpired = timer and goldBoostExpired(timer, player)
 
                     -- Check if we should return to Lobby instead of retrying
@@ -1932,15 +2060,21 @@ local function startMissionFarm()
                         return
                     end
 
+                    -- Lấy target Gold và rank trực tiếp để đảm bảo dữ liệu mới nhất
+                    local prestigeGold, currentRank = prestigeTarget(player)
+                    if prestigeGold == nil and timer and timer.prestigeGoldTarget ~= nil then
+                        prestigeGold = timer.prestigeGoldTarget
+                    end
+
                     -- Kiểm tra điều kiện đủ Level (>= 100) & đủ Vàng để Prestige
                     local currentLvl = readPlayerLevel(player)
                     local targetLevel = 100
-                    local hasLevel = (currentLvl == nil or currentLvl >= targetLevel)
-                    local hasGold = (prestigeGold ~= nil and type(gold) == "number" and gold >= prestigeGold)
+                    local hasLevel = (type(currentLvl) == "number" and currentLvl >= targetLevel)
+                    local hasGold = (prestigeGold ~= nil and (prestigeGold == 0 or (type(gold) == "number" and gold >= prestigeGold)))
 
                     if prestigeGold ~= nil and hasLevel and hasGold and not env.AutoPrestigeNotEligible then
-                        print(string.format("[AUTO PRESTIGE] ĐÃ ĐẠT LEVEL %s & ĐỦ VÀNG (%s >= %s) ĐỂ PRESTIGE! Quay về Lobby!",
-                            tostring(currentLvl or 100), tostring(gold), tostring(prestigeGold)))
+                        print(string.format("[AUTO PRESTIGE] ĐÃ ĐẠT LEVEL %s/100 & ĐỦ VÀNG (%s >= %s) CHO PRESTIGE %s! Đang quay về Lobby để Prestige...",
+                            tostring(currentLvl), tostring(gold or 0), tostring(prestigeGold), tostring((currentRank or 0) + 1)))
                         if stopMissionFarm then stopMissionFarm() end
                         local post = remote("POST")
                         if post then pcall(function() post:FireServer("Functions", "Teleport") end) end
@@ -1949,9 +2083,9 @@ local function startMissionFarm()
                         task.wait(5)
                         return
                     elseif prestigeGold ~= nil then
-                        if currentLvl and currentLvl < targetLevel then
-                            print(string.format("[AUTO PRESTIGE] Cày Prestige: Level hiện tại %d / %d. Chưa đủ Level -> Tiếp tục Retry!",
-                                currentLvl, targetLevel))
+                        if not hasLevel then
+                            print(string.format("[AUTO PRESTIGE] Cày Prestige: Level hiện tại %s / %d. Chưa đủ Level -> Tiếp tục Retry!",
+                                tostring(currentLvl or "?"), targetLevel))
                         elseif not hasGold then
                             print(string.format("[AUTO PRESTIGE] Cày Prestige: Vàng hiện tại %s / %s. Chưa đủ Vàng -> Tiếp tục Retry!",
                                 tostring(gold or 0), tostring(prestigeGold)))
