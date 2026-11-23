@@ -935,7 +935,9 @@ local function tryPrestige(player)
         print("[AUTO PRESTIGE] P1-P5 configuration complete; skipping further Prestige.")
         return
     end
-    print("[AUTO PRESTIGE] Prestige: P" .. rank .. " | Gold " .. tostring(gold) .. " | Target " .. tostring(target))
+    local rankTag = ranks[rank] and ranks[rank].Tag or (rank == 0 and "ENLIST" or "?")
+    print(string.format("[AUTO PRESTIGE] Prestige rank = %d (%s) | Gold %s | Target P%d = %s",
+        rank, tostring(rankTag), tostring(gold), rank + 1, tostring(target)))
     local currentLvl = readPlayerLevel(player)
     if currentLvl and currentLvl < 100 then
         print(string.format("[AUTO PRESTIGE] Prestige skipped: Level hiện tại %d chưa đạt Level 100.", currentLvl))
@@ -1494,7 +1496,18 @@ local function prestigeText()
     if type(saved) == "table" and saved.userId == player.UserId and saved.gameId == game.GameId
         and type(saved.rank) == "number" and saved.rank >= 0 and saved.rank < math.huge
         and saved.rank % 1 == 0 then
-        return tostring(saved.rank)
+        local rank = saved.rank
+        local tag
+        pcall(function()
+            local module = ReplicatedStorage:FindFirstChild("Modules")
+                and ReplicatedStorage.Modules:FindFirstChild("Storage")
+                and ReplicatedStorage.Modules.Storage:FindFirstChild("Ranks")
+            if module then
+                local ranks = require(module)
+                if type(ranks) == "table" and type(ranks[rank]) == "table" then tag = ranks[rank].Tag end
+            end
+        end)
+        return tag and (tostring(rank) .. " (" .. tag .. ")") or tostring(rank)
     end
     return "Chua xac nhan Prestige tai Lobby"
 end
@@ -1904,35 +1917,72 @@ local function startMissionFarm()
     end
     -- Auto Retry & Return-to-Lobby monitor on Rewards screen
     task.spawn(function()
-        local function triggerRetryButton(rewards)
-            if not rewards then return false end
+        local function findRewardButton(rewards, pattern)
+            if not rewards then return nil end
             for _, obj in ipairs(rewards:GetDescendants()) do
                 if obj:IsA("GuiButton") then
                     local name = obj.Name:lower()
                     local text = (obj:IsA("TextButton") and obj.Text or ""):lower()
                     local title = obj:FindFirstChild("Title")
                     local titleText = (title and title:IsA("TextLabel") and title.Text or ""):lower()
-                    if name:find("retry") or text:find("retry") or titleText:find("retry") or text:find("again") then
-                        pcall(function()
-                            if firesignal then
-                                firesignal(obj.MouseButton1Down)
-                                firesignal(obj.MouseButton1Up)
-                                firesignal(obj.MouseButton1Click)
-                                firesignal(obj.Activated)
-                            elseif getconnections then
-                                for _, c in pairs(getconnections(obj.MouseButton1Click)) do c:Fire() end
-                                for _, c in pairs(getconnections(obj.Activated)) do c:Fire() end
-                            end
-                        end)
-                        return true
+                    if name:find(pattern) or text:find(pattern) or titleText:find(pattern) then
+                        return obj
                     end
                 end
             end
-            return false
+        end
+
+        local function fireButton(button)
+            if not button then return false end
+            pcall(function()
+                for _, name in ipairs({"MouseButton1Down", "MouseButton1Up", "MouseButton1Click", "Activated"}) do
+                    local signal = button[name]
+                    if signal then
+                        if type(firesignal) == "function" then
+                            pcall(function() firesignal(signal) end)
+                        end
+                        if type(getconnections) == "function" then
+                            local ok, connections = pcall(function() return getconnections(signal) end)
+                            if ok and type(connections) == "table" then
+                                for _, connection in pairs(connections) do
+                                    if connection.Enabled ~= false and type(connection.Fire) == "function" then
+                                        pcall(function() connection:Fire() end)
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end)
+            return true
+        end
+
+        local function triggerRetryButton(rewards)
+            return fireButton(findRewardButton(rewards, "retry"))
+        end
+
+        local function triggerLeaveButton(rewards)
+            return fireButton(findRewardButton(rewards, "leave"))
+        end
+
+        -- Text hiển thị của nút: ưu tiên TextButton.Text, không có thì lấy label con tên "Title".
+        local function buttonText(button)
+            if not button then return "" end
+            if button:IsA("TextButton") and button.Text ~= "" then return button.Text end
+            local title = button:FindFirstChild("Title")
+            if title and title:IsA("TextLabel") then return title.Text end
+            return ""
+        end
+
+        -- Nút ghi "RETRY (0/1)": 0 = số lượt đã dùng, 1 = tổng số lượt. 0/1 nghĩa là còn 1 lượt.
+        local function retryUsage(rewards)
+            local used, total = buttonText(findRewardButton(rewards, "retry")):match("%((%d+)%s*/%s*(%d+)%)")
+            return tonumber(used), tonumber(total)
         end
 
         local retryCount = 0
         local lastRetryTime = 0
+        local clickedRetry = false
         while inMission() do
             task.wait(0.2)
             local rewards = path(player, {"PlayerGui", "Interface", "Rewards"})
@@ -2012,6 +2062,29 @@ local function startMissionFarm()
                         end
                     end
 
+                    -- Nút "RETRY (0/1)" = đã dùng 0/1 lượt, còn 1 lượt -> vẫn retry được.
+                    local used, total = retryUsage(rewards)
+                    local exhausted = used ~= nil and total ~= nil and used >= total
+                    -- Vừa bấm retry của mình nên bộ đếm lên 1/1: đang chờ "STARTING", không bấm LEAVE.
+                    if (exhausted and not clickedRetry) or retryCount >= 20 then
+                        print("[AUTO PRESTIGE] Không retry được ("
+                            .. (exhausted and not clickedRetry
+                                and ("RETRY " .. tostring(used) .. "/" .. tostring(total) .. " đã dùng hết")
+                                or "retry không phản hồi")
+                            .. "). Bấm LEAVE để về Lobby!")
+                        if stopMissionFarm then stopMissionFarm() end
+                        triggerLeaveButton(rewards)
+                        task.wait(5)
+                        if inMission() then
+                            local post = remote("POST")
+                            if post then pcall(function() post:FireServer("Functions", "Teleport") end) end
+                            local get = remote("GET")
+                            if get then pcall(function() get:InvokeServer("Functions", "Teleport", "Lobby") end) end
+                        end
+                        task.wait(5)
+                        return
+                    end
+
                     -- If not leaving to Lobby: Send Retry (retry every 1.5s while Rewards is visible)
                     if os.clock() - lastRetryTime >= 1.5 then
                         lastRetryTime = os.clock()
@@ -2030,6 +2103,7 @@ local function startMissionFarm()
 
                         local clicked = triggerRetryButton(rewards)
                         if clicked then
+                            clickedRetry = true
                             print("[AUTO PRESTIGE] Đã kích hoạt nút Retry trên giao diện Rewards!")
                         end
                     end
@@ -2037,6 +2111,7 @@ local function startMissionFarm()
             else
                 retryCount = 0
                 lastRetryTime = 0
+                clickedRetry = false
             end
         end
     end)
@@ -2193,7 +2268,7 @@ local function startMissionFarm()
                     root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
                     root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
                 end
-                print("[AUTO PRESTIGE] Blades empty: Teleport refill -> Bắn Remote -> Về lại vị trí cũ ngay lập tức!")
+                print("[AUTO PRESTIGE] Blades empty: Teleport refill -> Bắn Remote -> đợi 0.5s -> về vị trí cũ!")
                 pcall(function()
                     clearRefillHold()
                     root.Anchored = false
@@ -2204,6 +2279,9 @@ local function startMissionFarm()
                     post:FireServer("Attacks", "Reload", station)
                     key(Enum.KeyCode.R)
                 end)
+                -- Đứng tại trạm refill 0.5s cho server kịp nạp lưỡi rồi mới teleport về.
+                local waitUntil = os.clock() + 0.5
+                while valid() and os.clock() < waitUntil do task.wait(0.05) end
                 restore()
                 emptySince, emptyCharacter = nil, nil
             else
