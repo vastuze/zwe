@@ -669,56 +669,49 @@ local function readDifficulty(player)
     end
 
     -- 3. Nếu chưa có gradeIndex từ Remote (do chưa đủ tiền nâng hoặc 0 nâng cấp):
-    -- Thử đọc trực tiếp dữ liệu vũ khí từ Module Core.Update
+    -- Đọc liveData trực tiếp từ Core.Update: Grade = cấp thấp nhất trong 8 chỉ số vũ khí.
     if not gradeIndex then
+        local statsList = {
+            "Blade_Durability", "ODM_Gas", "ODM_Range", "ODM_Control",
+            "ODM_Speed", "Crit_Damage", "Crit_Chance", "ODM_Damage"
+        }
+        local liveData = nil
         pcall(function()
             local UpdateModule = ReplicatedStorage:FindFirstChild("Modules")
                 and ReplicatedStorage.Modules:FindFirstChild("Core")
                 and ReplicatedStorage.Modules.Core:FindFirstChild("Update")
             if UpdateModule then
                 local Update = require(UpdateModule)
-                local _, liveData = Update.Get_Data({Cache = {Player = player}}, true)
-                if liveData then
-                    local weapon = liveData.Weapon or (liveData.Slots and liveData.Current_Slot and liveData.Slots[liveData.Current_Slot] and liveData.Slots[liveData.Current_Slot].Weapon) or "Blades"
-                    local upTable = (liveData.Upgrades and (liveData.Upgrades[weapon] or liveData.Upgrades["Blades"] or liveData.Upgrades["Spears"]))
-                        or (liveData.Slots and liveData.Current_Slot and liveData.Slots[liveData.Current_Slot] and liveData.Slots[liveData.Current_Slot].Upgrades and (liveData.Slots[liveData.Current_Slot].Upgrades[weapon] or liveData.Slots[liveData.Current_Slot].Upgrades["Blades"]))
-                    if upTable then
-                        local statsList = {
-                            "Blade_Durability", "ODM_Gas", "ODM_Range", "ODM_Control",
-                            "ODM_Speed", "Crit_Damage", "Crit_Chance", "ODM_Damage"
-                        }
-                        local minLvl = 15
-                        local found = false
-                        for _, stat in ipairs(statsList) do
-                            if upTable[stat] ~= nil then
-                                found = true
-                                local lvl = tonumber(upTable[stat]) or 0
-                                if lvl < minLvl then minLvl = lvl end
-                            end
-                        end
-                        if found then
-                            gradeIndex = minLvl
-                            grade = values.Pot_Tags[gradeIndex] or (minLvl >= 15 and "S-")
-                            print(string.format("[AUTO PRESTIGE] Grade detected from live weapon stats: [%s GRADE] (Pot %d)", tostring(grade), gradeIndex))
-                        end
-                    end
-                    if not gradeIndex then
-                        local SharedModule = ReplicatedStorage:FindFirstChild("Modules")
-                            and ReplicatedStorage.Modules:FindFirstChild("Shared")
-                            and ReplicatedStorage.Modules.Shared:FindFirstChild("Shared")
-                        if SharedModule then
-                            local Shared = require(SharedModule)
-                            local pot = Shared.Get_Potential(nil, player, liveData)
-                            if type(pot) == "number" and values.Pot_Tags[pot] then
-                                gradeIndex = pot
-                                grade = values.Pot_Tags[pot]
-                                print(string.format("[AUTO PRESTIGE] Grade detected from Shared.Get_Potential(liveData): [%s GRADE] (Pot %d)", grade, gradeIndex))
-                            end
-                        end
-                    end
-                end
+                liveData = select(2, Update.Get_Data(nil, true))
             end
         end)
+        if liveData then
+            local weapon = liveData.Weapon
+                or (liveData.Slots and liveData.Current_Slot and liveData.Slots[liveData.Current_Slot]
+                    and liveData.Slots[liveData.Current_Slot].Weapon) or "Blades"
+            local upTable = (liveData.Upgrades
+                    and (liveData.Upgrades[weapon] or liveData.Upgrades["Blades"] or liveData.Upgrades["Spears"]))
+                or (liveData.Slots and liveData.Current_Slot and liveData.Slots[liveData.Current_Slot]
+                    and liveData.Slots[liveData.Current_Slot].Upgrades
+                    and (liveData.Slots[liveData.Current_Slot].Upgrades[weapon]
+                        or liveData.Slots[liveData.Current_Slot].Upgrades["Blades"]))
+            if upTable then
+                local minLvl, found = 15, false
+                for _, stat in ipairs(statsList) do
+                    if upTable[stat] ~= nil then
+                        found = true
+                        local lvl = tonumber(upTable[stat]) or 0
+                        if lvl < minLvl then minLvl = lvl end
+                    end
+                end
+                if found then
+                    gradeIndex = minLvl
+                    grade = values.Pot_Tags[minLvl] or (minLvl >= 15 and "S-")
+                    print(string.format("[AUTO PRESTIGE] Grade from live weapon stats (Core.Update): [%s GRADE] (Pot %d)",
+                        tostring(grade), gradeIndex))
+                end
+            end
+        end
     end
 
     if not gradeIndex then
