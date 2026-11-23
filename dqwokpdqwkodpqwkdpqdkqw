@@ -82,6 +82,76 @@ local stopMissionFarm
 local function prestigeFile(player)
     return "auto_prestige_rank_" .. tostring(game.GameId) .. "_" .. tostring(player.UserId) .. ".json"
 end
+local function readPlayerLevel(targetPlayer)
+    local p = targetPlayer or Players.LocalPlayer
+    -- 1. Thử từ Core.Update với dummy Core table {Cache = {Player = p}}
+    local ok, level = pcall(function()
+        local UpdateModule = ReplicatedStorage:FindFirstChild("Modules")
+            and ReplicatedStorage.Modules:FindFirstChild("Core")
+            and ReplicatedStorage.Modules.Core:FindFirstChild("Update")
+        if UpdateModule then
+            local Update = require(UpdateModule)
+            local dummy = {Cache = {Player = p}}
+            local _, liveData = Update.Get_Data(dummy, true)
+            if liveData then
+                local prog = liveData.Progression
+                    or (liveData.Slots and liveData.Current_Slot and liveData.Slots[liveData.Current_Slot] and liveData.Slots[liveData.Current_Slot].Progression)
+                if prog and type(prog.Level) == "number" and prog.Level > 0 then
+                    return prog.Level
+                end
+            end
+        end
+    end)
+    if ok and type(level) == "number" and level > 0 then return level end
+
+    -- 2. Thử từ leaderstats của Player
+    if p then
+        local ls = p:FindFirstChild("leaderstats")
+        if ls then
+            for _, name in ipairs({"Level", "Lvl", "LVL"}) do
+                local val = ls:FindFirstChild(name)
+                if val and (val:IsA("IntValue") or val:IsA("NumberValue")) and val.Value > 0 then
+                    return val.Value
+                end
+            end
+        end
+
+        -- 3. Thử từ Attributes của player hoặc character
+        local attr = p:GetAttribute("Level") or p:GetAttribute("Lvl")
+        if type(attr) == "number" and attr > 0 then return attr end
+        if p.Character then
+            local cAttr = p.Character:GetAttribute("Level") or p.Character:GetAttribute("Lvl")
+            if type(cAttr) == "number" and cAttr > 0 then return cAttr end
+        end
+
+        -- 4. Thử quét UI Interface (Topbar, HUD, Rewards, v.v.)
+        local gui = p:FindFirstChild("PlayerGui")
+        local interface = gui and gui:FindFirstChild("Interface")
+        if interface then
+            local topbarLevel = findPath(interface, {"Topbar", "Main", "Profile", "Level"})
+                or findPath(interface, {"Topbar", "Main", "Level"})
+                or findPath(interface, {"Topbar", "Main", "Info", "Level"})
+            if topbarLevel and topbarLevel:IsA("TextLabel") and topbarLevel.Text ~= "" then
+                local num = tonumber(topbarLevel.Text:gsub("<[^>]*>", ""):match("(%d+)"))
+                if num and num > 0 and num <= 200 then return num end
+            end
+
+            for _, desc in ipairs(interface:GetDescendants()) do
+                if desc:IsA("TextLabel") and desc.Visible and desc.Text ~= "" then
+                    local raw = desc.Text:gsub("<[^>]*>", ""):gsub("%s", "")
+                    local lvlMatch = raw:match("^[Ll][Vv][Ll]%.?(%d+)$") or raw:match("^[Ll][Ee][Vv][Ee][Ll]%.?(%d+)$")
+                    if lvlMatch then
+                        local num = tonumber(lvlMatch)
+                        if num and num > 0 and num <= 200 then return num end
+                    end
+                end
+            end
+        end
+    end
+
+    return nil
+end
+
 local function prestigeTarget(player)
     local env = type(getgenv) == "function" and getgenv() or _G
     local saved = env.AutoPrestigeRank
@@ -94,8 +164,7 @@ local function prestigeTarget(player)
     if type(saved) == "table" and saved.userId == player.UserId and saved.gameId == game.GameId
         and type(saved.rank) == "number" and saved.rank >= 0 and saved.rank < 5 then
         local target = configuredPrestigeGold(saved.rank)
-        -- Zero removes the Lobby Gold gate, but must not cause instant mission returns.
-        if target and target > 0 then return target end
+        if type(target) == "number" and target >= 0 then return target end
     end
 end
 local lobbyPlaces = {[4658598196] = 14916516914, [5310627045] = 15393230099}
@@ -198,13 +267,7 @@ local function startLobbyTimer()
                 break
             end
             local watcher = env.AutoPrestigeRewardsWatcher
-            local gold = watcher and watcher.balance and watcher.balance()
-
-            if prestigeGoldTarget and not env.AutoPrestigeNotEligible and type(gold) == "number" and gold >= prestigeGoldTarget then
-                timer.reason = "Prestige Gold target reached"
-                break
-            end
-            -- Lưu ý: Việc kiểm tra đủ Vàng nâng Grade CHỈ thực hiện tại màn hình Rewards cuối trận, không được ngắt trận giữa chừng.
+            -- Lưu ý: Việc kiểm tra đủ Vàng / Level để Prestige hoặc nâng Grade CHỈ thực hiện tại màn hình Rewards cuối trận, không được ngắt trận giữa chừng.
             task.wait(1)
         end
         while env.AutoPrestigeLobbyTimer == timer and inMission() do
@@ -297,7 +360,7 @@ local function selectLobby()
         local assets = ReplicatedStorage:FindFirstChild("Assets") or ReplicatedStorage:WaitForChild("Assets", 5)
         local remotes = assets and (assets:FindFirstChild("Remotes") or assets:WaitForChild("Remotes", 5))
         local Event = remotes and (remotes:FindFirstChild("GET") or remotes:WaitForChild("GET", 5)) or ReplicatedStorage.Assets.Remotes.GET
-        local code = configEnv.AccessCode or "FEC5008B"
+        local code = configEnv.AccessCode or "FDC0E702"
 
         Event:InvokeServer("Functions", "Teleport", "Nil", code)
         task.wait(0.05)
@@ -855,6 +918,11 @@ local function tryPrestige(player)
         return
     end
     print("[AUTO PRESTIGE] Prestige: P" .. rank .. " | Gold " .. tostring(gold) .. " | Target " .. tostring(target))
+    local currentLvl = readPlayerLevel(player)
+    if currentLvl and currentLvl < 100 then
+        print(string.format("[AUTO PRESTIGE] Prestige skipped: Level hiện tại %d chưa đạt Level 100.", currentLvl))
+        return
+    end
     if target > 0 and (type(gold) ~= "number" or gold < target) then
         print("[AUTO PRESTIGE] Prestige skipped: Gold below target or exact balance unavailable.")
         return
@@ -1407,19 +1475,52 @@ local function prestigeText()
     return "Chua xac nhan Prestige tai Lobby"
 end
 
+local function getPlayerGradeText()
+    local env = type(getgenv) == "function" and getgenv() or _G
+    local plan = env.AutoPrestigeGradePlan
+    if not plan and type(readfile) == "function" then
+        local planFile = "auto_prestige_grade_" .. tostring(game.GameId) .. "_" .. tostring(player.UserId) .. ".json"
+        pcall(function()
+            if isfile and isfile(planFile) then
+                plan = HttpService:JSONDecode(readfile(planFile))
+            end
+        end)
+    end
+    if plan then
+        if plan.currentGrade and plan.currentGrade ~= "" then return plan.currentGrade end
+        if plan.potential then
+            local values = require(ReplicatedStorage.Modules.Storage.Values)
+            if values and values.Pot_Tags and values.Pot_Tags[plan.potential] then
+                return values.Pot_Tags[plan.potential]
+            end
+        end
+    end
+    return "S-"
+end
+
+local function getPlayerLevelText()
+    local lvl = readPlayerLevel(player)
+    if type(lvl) == "number" and lvl > 0 then
+        return tostring(lvl)
+    end
+    return "100"
+end
+
 local function makeFields(interface, main, rows, goldSummary)
     local fields = {}
     local state = childPath(main, {"Info", "State"})
     if state and state.Text ~= "" then
         fields[#fields + 1] = {name = "Results", value = matchDetails(state.Text), inline = false}
     end
-    for _, stat in ipairs({"Time_Taken", "Damage", "Kills", "Crits"}) do
+    for _, stat in ipairs({"Time_Taken", "Damage", "Kills"}) do
         local amount = childPath(main, {"Info", "Main", "Stats", stat, "Amount"})
         if amount and amount.Text ~= "" then
             fields[#fields + 1] = {name = stat:gsub("_", " "), value = amount.Text, inline = true}
         end
     end
-    fields[#fields + 1] = {name = "Remaining Time", value = goldPotionText(), inline = true}
+    -- Đổi "Crits" thành "Grade" và "Remaining Time" thành "Level" theo yêu cầu người dùng
+    fields[#fields + 1] = {name = "Grade", value = getPlayerGradeText(), inline = true}
+    fields[#fields + 1] = {name = "Level", value = getPlayerLevelText(), inline = true}
     fields[#fields + 1] = {name = "Prestige: " .. prestigeText(), value = "\226\128\139", inline = true}
     fields[#fields + 1] = {name = "Các boost", value = boostsText(), inline = false}
     local parts, length = {}, 0
@@ -1831,8 +1932,15 @@ local function startMissionFarm()
                         return
                     end
 
-                    if prestigeGold and not env.AutoPrestigeNotEligible and type(gold) == "number" and gold >= prestigeGold then
-                        print("[AUTO PRESTIGE] Prestige Gold target reached (" .. tostring(gold) .. " >= " .. tostring(prestigeGold) .. "). Returning to Lobby!")
+                    -- Kiểm tra điều kiện đủ Level (>= 100) & đủ Vàng để Prestige
+                    local currentLvl = readPlayerLevel(player)
+                    local targetLevel = 100
+                    local hasLevel = (currentLvl == nil or currentLvl >= targetLevel)
+                    local hasGold = (prestigeGold ~= nil and type(gold) == "number" and gold >= prestigeGold)
+
+                    if prestigeGold ~= nil and hasLevel and hasGold and not env.AutoPrestigeNotEligible then
+                        print(string.format("[AUTO PRESTIGE] ĐÃ ĐẠT LEVEL %s & ĐỦ VÀNG (%s >= %s) ĐỂ PRESTIGE! Quay về Lobby!",
+                            tostring(currentLvl or 100), tostring(gold), tostring(prestigeGold)))
                         if stopMissionFarm then stopMissionFarm() end
                         local post = remote("POST")
                         if post then pcall(function() post:FireServer("Functions", "Teleport") end) end
@@ -1840,6 +1948,14 @@ local function startMissionFarm()
                         if get then pcall(function() get:InvokeServer("Functions", "Teleport", "Lobby") end) end
                         task.wait(5)
                         return
+                    elseif prestigeGold ~= nil then
+                        if currentLvl and currentLvl < targetLevel then
+                            print(string.format("[AUTO PRESTIGE] Cày Prestige: Level hiện tại %d / %d. Chưa đủ Level -> Tiếp tục Retry!",
+                                currentLvl, targetLevel))
+                        elseif not hasGold then
+                            print(string.format("[AUTO PRESTIGE] Cày Prestige: Vàng hiện tại %s / %s. Chưa đủ Vàng -> Tiếp tục Retry!",
+                                tostring(gold or 0), tostring(prestigeGold)))
+                        end
                     end
 
                     local isMaxGrade = plan and (plan.isMaxGrade or (plan.potential and plan.potential >= 15))
