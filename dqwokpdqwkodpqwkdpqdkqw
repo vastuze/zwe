@@ -297,7 +297,7 @@ local function selectLobby()
         local assets = ReplicatedStorage:FindFirstChild("Assets") or ReplicatedStorage:WaitForChild("Assets", 5)
         local remotes = assets and (assets:FindFirstChild("Remotes") or assets:WaitForChild("Remotes", 5))
         local Event = remotes and (remotes:FindFirstChild("GET") or remotes:WaitForChild("GET", 5)) or ReplicatedStorage.Assets.Remotes.GET
-        local code = configEnv.AccessCode or "FDC0E702"
+        local code = configEnv.AccessCode or "FEC5008B"
 
         Event:InvokeServer("Functions", "Teleport", "Nil", code)
         task.wait(0.05)
