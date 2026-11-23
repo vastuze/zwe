@@ -21,12 +21,20 @@ if configEnv.Modifiers == nil then
     configEnv.Modifiers = {"No Perks", "No Skills", "No Memories", "Nightmare", "Injury Prone",
         "Chronic Injuries", "Fog", "Glass Cannon", "Time Trial", "Fatigue", "Evolution"}
 end
+-- Skill chain: mở các skill point sau khi nâng Grade xong ở Lobby ({} = tắt).
+if configEnv.SkillChain == nil then
+    configEnv.SkillChain = {}
+    for id = 1, 26 do
+        configEnv.SkillChain[#configEnv.SkillChain + 1] = tostring(id)
+    end
+end
 if configEnv.WebhookImageURL == nil then configEnv.WebhookImageURL = "https://cdn.discordapp.com/attachments/983578378370170911/1568333579883384972/1781178911498_z7o8gg4.png?ex=6aef6ff7&is=6aee1e77&hm=b9eefe3c083a463fceeb9791566751d8c37e09668e1d65c9a9a39fa297d74765&" end
 assert(type(configEnv.UseGoldBoost) == "boolean",
     "UseGoldBoost must be true or false WITHOUT quotes; received " .. type(configEnv.UseGoldBoost))
 assert(type(configEnv.PrestigeSettings) == "table", "PrestigeSettings must be a table.")
 assert(type(configEnv.MaxDifficulty) == "string", "MaxDifficulty must be a string.")
 assert(type(configEnv.Modifiers) == "table", "Modifiers must be a list of names.")
+assert(type(configEnv.SkillChain) == "table", "SkillChain must be a list of skill IDs.")
 do
     local allowed = {"No Perks", "No Skills", "No Memories", "Nightmare", "Injury Prone",
         "Chronic Injuries", "Fog", "Glass Cannon", "Time Trial", "Fatigue", "Evolution",
@@ -79,26 +87,48 @@ while not Players.LocalPlayer do task.wait(0.25) end
 Players.LocalPlayer:WaitForChild("PlayerGui")
 local TIMEOUT = 30
 local stopMissionFarm
+
+-- Core.Update.Get_Data có thể trả (ok, data) hoặc chỉ (data): chọn bảng đúng theo shape,
+-- không phụ thuộc select(2, ...) như trước (dễ ra nil -> tụt Grade E -> chọn Easy).
+local function readLiveData(targetPlayer)
+    local p = targetPlayer or Players.LocalPlayer
+    local UpdateModule = ReplicatedStorage:FindFirstChild("Modules")
+        and ReplicatedStorage.Modules:FindFirstChild("Core")
+        and ReplicatedStorage.Modules.Core:FindFirstChild("Update")
+    if not UpdateModule then return nil end
+    local okModule, Update = pcall(function() return require(UpdateModule) end)
+    if not okModule or type(Update) ~= "table" or type(Update.Get_Data) ~= "function" then return nil end
+    for _, call in ipairs({
+        function() return Update.Get_Data({Cache = {Player = p}}, true) end,
+        function() return Update.Get_Data(nil, true) end,
+    }) do
+        local results = table.pack(pcall(call))
+        if results[1] then
+            for index = 2, results.n do
+                local value = results[index]
+                if type(value) == "table"
+                    and (value.Upgrades or value.Slots or value.Progression or value.Weapon) then
+                    return value
+                end
+            end
+        end
+    end
+    return nil
+end
+
 local function prestigeFile(player)
     return "auto_prestige_rank_" .. tostring(game.GameId) .. "_" .. tostring(player.UserId) .. ".json"
 end
 local function readPlayerLevel(targetPlayer)
     local p = targetPlayer or Players.LocalPlayer
-    -- 1. Thử từ Core.Update với dummy Core table {Cache = {Player = p}}
+    -- 1. Thử từ Core.Update ({Cache = {Player = p}} hoặc không có self)
     local ok, level = pcall(function()
-        local UpdateModule = ReplicatedStorage:FindFirstChild("Modules")
-            and ReplicatedStorage.Modules:FindFirstChild("Core")
-            and ReplicatedStorage.Modules.Core:FindFirstChild("Update")
-        if UpdateModule then
-            local Update = require(UpdateModule)
-            local dummy = {Cache = {Player = p}}
-            local _, liveData = Update.Get_Data(dummy, true)
-            if liveData then
-                local prog = liveData.Progression
-                    or (liveData.Slots and liveData.Current_Slot and liveData.Slots[liveData.Current_Slot] and liveData.Slots[liveData.Current_Slot].Progression)
-                if prog and type(prog.Level) == "number" and prog.Level > 0 then
-                    return prog.Level
-                end
+        local liveData = readLiveData(p)
+        if liveData then
+            local prog = liveData.Progression
+                or (liveData.Slots and liveData.Current_Slot and liveData.Slots[liveData.Current_Slot] and liveData.Slots[liveData.Current_Slot].Progression)
+            if prog and type(prog.Level) == "number" and prog.Level > 0 then
+                return prog.Level
             end
         end
     end)
@@ -214,17 +244,8 @@ end
 local function readLivePotential(targetPlayer)
     local p = targetPlayer or Players.LocalPlayer
     local values = require(ReplicatedStorage.Modules.Storage.Values)
-    local UpdateModule = ReplicatedStorage:FindFirstChild("Modules")
-        and ReplicatedStorage.Modules:FindFirstChild("Core")
-        and ReplicatedStorage.Modules.Core:FindFirstChild("Update")
-    if not UpdateModule then return nil, values end
-    local Update = require(UpdateModule)
-    -- Core.Update truy cập self.Cache, nên phải truyền bảng Core có Cache.Player.
-    local ok, liveData = pcall(function() return select(2, Update.Get_Data({Cache = {Player = p}}, true)) end)
-    if not (ok and liveData) then
-        ok, liveData = pcall(function() return select(2, Update.Get_Data(nil, true)) end)
-    end
-    if not (ok and liveData) then return nil, values end
+    local liveData = readLiveData(p)
+    if not liveData then return nil, values end
 
     local weapon = liveData.Weapon
         or (liveData.Slots and liveData.Current_Slot and liveData.Slots[liveData.Current_Slot] and liveData.Slots[liveData.Current_Slot].Weapon)
@@ -270,6 +291,18 @@ local function readGradeIndex(targetPlayer)
     if tag and values and values.Pot_Tags then
         for index, potTag in pairs(values.Pot_Tags) do
             if potTag == tag then return index, values end
+        end
+    end
+    -- Grade đã lưu trong ledger webhook (cùng file Gold/Gems): place không đọc được live vẫn có grade.
+    local env = type(getgenv) == "function" and getgenv() or _G
+    local watcher = env.AutoPrestigeRewardsWatcher
+    local stored = watcher and watcher.grade and watcher.grade()
+    if type(stored) == "string" and values and values.Pot_Tags then
+        for index, potTag in pairs(values.Pot_Tags) do
+            if potTag == stored then
+                print(string.format("[AUTO PRESTIGE] Grade from ledger: [%s GRADE] (Pot %d)", stored, index))
+                return index, values
+            end
         end
     end
     return nil, values
@@ -623,12 +656,18 @@ local function upgradeAll(player, interface, equipment, values)
             or (lastData.Slots and lastData.Current_Slot and lastData.Slots[lastData.Current_Slot] and lastData.Slots[lastData.Current_Slot].Upgrades and (lastData.Slots[lastData.Current_Slot].Upgrades[weapon] or lastData.Slots[lastData.Current_Slot].Upgrades["Blades"]))
         if upTable then
             local minLvl = 15
+            local found = false
             for _, stat in ipairs(statsList) do
-                local lvl = tonumber(upTable[stat]) or 0
-                if lvl < minLvl then minLvl = lvl end
+                if upTable[stat] ~= nil then
+                    found = true
+                    local lvl = tonumber(upTable[stat]) or 0
+                    if lvl < minLvl then minLvl = lvl end
+                end
             end
-            newPotential = minLvl
-            print(string.format("[AUTO PRESTIGE] Potential tinh tu 8 chi so: %d -> [%s GRADE]", newPotential, values.Pot_Tags[newPotential] or "?"))
+            if found then
+                newPotential = minLvl
+                print(string.format("[AUTO PRESTIGE] Potential tinh tu 8 chi so: %d -> [%s GRADE]", newPotential, values.Pot_Tags[newPotential] or "?"))
+            end
         end
 
         -- 2. Thử gọi Shared.Get_Potential nếu chưa có
@@ -688,6 +727,50 @@ local function upgradeAll(player, interface, equipment, values)
     end
     print("[AUTO PRESTIGE] Equipment upgrade via Remote finished.")
     return lastData, newPotential, totalUpgrades
+end
+
+-- Mở skill point theo configEnv.SkillChain (gọi sau khi nâng Grade ở Lobby).
+local function unlockSkillChain(player)
+    local chain = configEnv.SkillChain
+    if type(chain) ~= "table" or #chain == 0 then return end
+    local assets = ReplicatedStorage:FindFirstChild("Assets")
+    local remotes = assets and assets:FindFirstChild("Remotes")
+    local Event = remotes and remotes:FindFirstChild("GET")
+    if not Event then
+        warn("[SKILL] GET remote not found; skipping skill unlock.")
+        return
+    end
+    local skillsModule = ReplicatedStorage:FindFirstChild("Modules")
+        and ReplicatedStorage.Modules:FindFirstChild("Storage")
+        and ReplicatedStorage.Modules.Storage:FindFirstChild("Skills")
+    local skills
+    if skillsModule then
+        pcall(function() skills = require(skillsModule) end)
+    end
+    local opened, refused, errors = 0, 0, 0
+    for _, id in ipairs(chain) do
+        local key = tostring(id)
+        local def = type(skills) == "table" and skills[key] or nil
+        local label = def and (key .. " (" .. tostring(def.Tag) .. ")") or key
+        local packed = table.pack(pcall(function() return Event:InvokeServer("S_Equipment", "Unlock", {key}) end))
+        if not packed[1] then
+            errors = errors + 1
+            warn("[SKILL] Unlock " .. label .. " errored: " .. tostring(packed[2]))
+        else
+            errors = 0
+            local parts = {}
+            for index = 2, packed.n do parts[#parts + 1] = tostring(packed[index]) end
+            print("[SKILL] Unlock " .. label .. " -> " .. (#parts > 0 and table.concat(parts, ", ") or "no return"))
+            if packed[2] == false then refused = refused + 1 else opened = opened + 1 end
+        end
+        if errors >= 3 then
+            warn("[SKILL] Remote Unlock loi 3 lan lien tiep; dung chain luot nay.")
+            break
+        end
+        task.wait(0.25)
+    end
+    print(string.format("[SKILL] Ket qua: mo %d | bi tu choi %d | loi %d (tong %d node). Thieu point thi farm tiep roi thu lai luot Lobby sau.",
+        opened, refused, errors, #chain))
 end
 
 local function sendLobbyResult(result, fields)
@@ -804,24 +887,27 @@ local function readDifficulty(player)
         end)
     end
 
-    -- 4. Không đọc được live: coi là Grade thấp nhất (E) để script vẫn tự chạy tiếp
+    -- 4. Không đọc được Grade ở đâu: KHÔNG tự gán Grade E (dễ chọn nhầm Easy).
     if not gradeIndex or not grade then
-        warn("[AUTO PRESTIGE] Không đọc được Grade live; giả định Grade E (Pot 1) để tiếp tục nâng cấp/farm.")
-        gradeIndex = 1
-        grade = values.Pot_Tags[1] or "E"
+        warn("[AUTO PRESTIGE] Không đọc được Grade (live/UI/ledger); giữ độ khó tối đa "
+            .. tostring(configEnv.MaxDifficulty or "Aberrant") .. " thay vì tụt về Easy.")
+        grade = "?"
     end
 
     -- 5. Mục tiêu Grade kế tiếp tính live từ dữ liệu vừa đọc (không lưu plan)
     local gradeGoldTarget, targetGrade = nextGradeTarget(values, gradeIndex)
-    if gradeIndex >= 15 then
+    if type(gradeIndex) == "number" and gradeIndex >= 15 then
         print("[AUTO PRESTIGE] Grade " .. tostring(grade) .. " (Pot " .. tostring(gradeIndex) .. ") is MAX grade (S-). No Lobby return needed for upgrades.")
     elseif gradeGoldTarget then
         print("[AUTO PRESTIGE] Grade plan: " .. tostring(grade) .. " (Pot " .. tostring(gradeIndex) .. ") -> Next " .. tostring(targetGrade) .. " needs " .. gradeGoldTarget .. " Gold.")
     end
 
+    -- Unlock skill chain sau khi nâng Grade (configEnv.SkillChain, {} = tắt).
+    pcall(unlockSkillChain, player)
+
     -- 6. Lưu Grade vào ledger webhook (Gold/Gems) để place mission đọc lại được.
     local watcher = env.AutoPrestigeRewardsWatcher
-    if watcher and watcher.setGrade and grade then
+    if watcher and watcher.setGrade and type(gradeIndex) == "number" and grade then
         local stored = watcher.grade and watcher.grade()
         if (upgradeRounds or 0) > 0 or not stored then watcher.setGrade(grade) end
     end
@@ -840,21 +926,25 @@ local function readDifficulty(player)
     local maxTarget = tostring(configEnv.MaxDifficulty or "Aberrant"):lower():match("^%s*(.-)%s*$")
     local maxRank = difficultyRanks[maxTarget] or 5
     local difficulty, bestRank = nil, 0
-    for _, requirement in pairs(values.Difficulty_Potential.Missions) do
-        if type(requirement) == "table" and requirement[1] and requirement[2] then
-            local name = tostring(requirement[1]):match("^%s*(.-)%s*$")
-            local cleanLower = name:lower()
-            if cleanLower ~= "freedom" then
-                local rank = difficultyRanks[cleanLower]
-                if rank and gradeIndex >= requirement[2] and rank <= maxRank and rank > bestRank then
-                    difficulty = name
-                    bestRank = rank
+    if type(gradeIndex) == "number" then
+        for _, requirement in pairs(values.Difficulty_Potential.Missions) do
+            if type(requirement) == "table" and requirement[1] and requirement[2] then
+                local name = tostring(requirement[1]):match("^%s*(.-)%s*$")
+                local cleanLower = name:lower()
+                if cleanLower ~= "freedom" then
+                    local rank = difficultyRanks[cleanLower]
+                    if rank and gradeIndex >= requirement[2] and rank <= maxRank and rank > bestRank then
+                        difficulty = name
+                        bestRank = rank
+                    end
                 end
             end
         end
     end
     if not difficulty then
-        difficulty = "Hard" -- Fallback an toàn để luôn vào trận
+        -- Không xác định được Grade: giữ MaxDifficulty, không bao giờ tự chọn Easy.
+        local capName = tostring(configEnv.MaxDifficulty or "Aberrant"):match("^%s*(.-)%s*$")
+        difficulty = capName ~= "" and capName or "Aberrant"
     end
     print("[AUTO PRESTIGE] Step 1.5: Grade " .. tostring(grade) .. " (Pot " .. tostring(gradeIndex) .. ") -> Selected Difficulty: " .. difficulty .. " (Capped at Aberrant)")
     return difficulty
@@ -876,21 +966,15 @@ local function tryPrestige(player)
                 if text == rank.Tag:upper() then return index end
             end
         end
-        -- Thử đọc Rank / Prestige từ Module Core.Update
+        -- Thử đọc Rank / Prestige từ Module Core.Update (shape-tolerant)
         local rankFromData = nil
         pcall(function()
-            local UpdateModule = ReplicatedStorage:FindFirstChild("Modules")
-                and ReplicatedStorage.Modules:FindFirstChild("Core")
-                and ReplicatedStorage.Modules.Core:FindFirstChild("Update")
-            if UpdateModule then
-                local Update = require(UpdateModule)
-                local _, liveData = Update.Get_Data({Cache = {Player = player}}, true)
-                if liveData then
-                    local pRank = liveData.Rank or liveData.Prestige
-                        or (liveData.Slots and liveData.Current_Slot and liveData.Slots[liveData.Current_Slot] and (liveData.Slots[liveData.Current_Slot].Rank or liveData.Slots[liveData.Current_Slot].Prestige))
-                    if type(pRank) == "number" then
-                        rankFromData = pRank
-                    end
+            local liveData = readLiveData(player)
+            if liveData then
+                local pRank = liveData.Rank or liveData.Prestige
+                    or (liveData.Slots and liveData.Current_Slot and liveData.Slots[liveData.Current_Slot] and (liveData.Slots[liveData.Current_Slot].Rank or liveData.Slots[liveData.Current_Slot].Prestige))
+                if type(pRank) == "number" then
+                    rankFromData = pRank
                 end
             end
         end)
