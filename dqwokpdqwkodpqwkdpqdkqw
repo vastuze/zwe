@@ -389,10 +389,8 @@ local function startLobbyTimer()
     if gradeVerified and not isMaxGrade then
         gradeGoldTarget, targetGrade = nextGradeTarget(values, potential)
     elseif not gradeVerified then
-        -- Place mission không có Modules.Core.Update: giả định Grade E để vẫn về Lobby nâng cấp.
-        gradeGoldTarget, targetGrade = nextGradeTarget(values, 1)
-        warn("[AUTO PRESTIGE] Grade chưa đọc được trong mission; giả định Grade E ("
-            .. tostring(targetGrade) .. " cần " .. tostring(gradeGoldTarget) .. " Gold); sẽ đọc lại mỗi giây.")
+        -- Chưa xác nhận Grade: không đặt mốc vàng giả (trước đây = Grade E 10k) để khỏi về Lobby oan.
+        warn("[AUTO PRESTIGE] Chưa xác nhận Grade trong mission; sẽ đọc lại mỗi giây, chưa đặt mốc Vàng.")
     end
 
     local timer = {
@@ -408,6 +406,10 @@ local function startLobbyTimer()
     env.AutoPrestigeLobbyTimer = timer
     goldBoostExpired(timer, player)
 
+    if not configEnv.UseGoldBoost then
+        print("[AUTO PRESTIGE] UseGoldBoost=false: không về Lobby vì Gold Boost, chỉ retry trong mission.")
+    end
+
     if isMaxGrade then
         print("[AUTO PRESTIGE] Max Grade (S-) detected: Continuous Mission Farming active.")
     elseif gradeGoldTarget then
@@ -418,6 +420,7 @@ local function startLobbyTimer()
 
     task.spawn(function()
         while env.AutoPrestigeLobbyTimer == timer and inMission() do
+            -- Chỉ về Lobby khi có bật Gold Boost và potion đã hết (UseGoldBoost=false -> hàm trả false).
             if goldBoostExpired(timer, player) then
                 timer.reason = "Gold Boost expired; return to Lobby to restock"
                 break
@@ -2149,8 +2152,12 @@ local function startMissionFarm()
                     -- Nút "RETRY (0/1)" = đã dùng 0/1 lượt, còn 1 lượt -> vẫn retry được.
                     local used, total = retryUsage(rewards)
                     local exhausted = used ~= nil and total ~= nil and used >= total
+                    -- MISSION FAILED mới cần thoát khi bấm retry mãi không ăn; COMPLETED thì cứ retry.
+                    local stateLabel = path(main, {"Info", "State"})
+                    local stateText = (stateLabel and stateLabel.Text or ""):upper()
+                    local failed = stateText:find("FAIL", 1, true) ~= nil
                     -- Vừa bấm retry của mình nên bộ đếm lên 1/1: đang chờ "STARTING", không bấm LEAVE.
-                    if (exhausted and not clickedRetry) or retryCount >= 20 then
+                    if (exhausted and not clickedRetry) or (failed and retryCount >= 20) then
                         print("[AUTO PRESTIGE] Không retry được ("
                             .. (exhausted and not clickedRetry
                                 and ("RETRY " .. tostring(used) .. "/" .. tostring(total) .. " đã dùng hết")
