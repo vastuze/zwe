@@ -1601,15 +1601,24 @@ end
 
 local function getPlayerGradeText()
     local potential, values = readGradeIndex(player)
+    local tag
     if type(potential) == "number" and values and values.Pot_Tags and values.Pot_Tags[potential] then
-        return values.Pot_Tags[potential]
+        tag = values.Pot_Tags[potential]
     end
-    local tag = readGradeFromUI(player)
-    if tag then return tag end
-    -- Place mission không có Core.Update: lấy Grade đã lưu trong ledger (cùng chỗ Gold/Gems).
+    if not tag then tag = readGradeFromUI(player) end
+    -- Place mission không có Core.Update/UI: lấy Grade đã lưu trong ledger (cùng chỗ Gold/Gems).
     local watcher = configEnv.AutoPrestigeRewardsWatcher
-    if watcher and watcher.grade then return watcher.grade() end
-    return nil
+    if not tag and watcher and watcher.grade then tag = watcher.grade() end
+    if not tag then
+        local env = type(getgenv) == "function" and getgenv() or _G
+        local timer = env.AutoPrestigeLobbyTimer
+        if timer and timer.isMaxGrade then tag = "S-" end
+    end
+    if type(tag) == "string" and tag ~= "" and tag ~= "?"
+        and watcher and watcher.setGrade then
+        pcall(watcher.setGrade, tag)
+    end
+    return tag or "?"
 end
 
 local function getPlayerLevelText()
@@ -1633,10 +1642,7 @@ local function makeFields(interface, main, rows, goldSummary)
         end
     end
     -- Đổi "Crits" thành "Grade" và "Remaining Time" thành "Level" theo yêu cầu người dùng
-    local gradeText = getPlayerGradeText()
-    if gradeText then
-        fields[#fields + 1] = {name = "Grade", value = gradeText, inline = true}
-    end
+    fields[#fields + 1] = {name = "Grade", value = getPlayerGradeText(), inline = true}
     fields[#fields + 1] = {name = "Level", value = getPlayerLevelText(), inline = true}
     fields[#fields + 1] = {name = "Prestige: " .. prestigeText(), value = "\226\128\139", inline = true}
     fields[#fields + 1] = {name = "Các boost", value = boostsText(), inline = false}
