@@ -413,7 +413,9 @@ local function startLobbyTimer()
     if isMaxGrade then
         print("[AUTO PRESTIGE] Max Grade (S-) detected: Continuous Mission Farming active.")
     elseif gradeGoldTarget then
-        print("[AUTO PRESTIGE] In mission: Farming until Grade " .. tostring(targetGrade) .. " (" .. tostring(gradeGoldTarget) .. " Gold) or Gold Boost expiry.")
+        local boostNote = configEnv.UseGoldBoost and " or Gold Boost expiry" or ""
+        print("[AUTO PRESTIGE] In mission: Farming until Grade " .. tostring(targetGrade)
+            .. " (" .. tostring(gradeGoldTarget) .. " Gold)" .. boostNote .. ".")
     else
         print("[AUTO PRESTIGE] In mission: chưa có mốc Vàng (Grade chưa đọc được); sẽ đọc lại mỗi giây, vẫn farm tiếp.")
     end
@@ -444,7 +446,8 @@ local function startLobbyTimer()
             -- Lưu ý: Việc kiểm tra đủ Vàng / Level để Prestige hoặc nâng Grade CHỈ thực hiện tại màn hình Rewards cuối trận, không được ngắt trận giữa chừng.
             task.wait(1)
         end
-        while env.AutoPrestigeLobbyTimer == timer and inMission() do
+        -- Hard guard: with UseGoldBoost=false no code path may leave the mission for a boost.
+        while configEnv.UseGoldBoost and env.AutoPrestigeLobbyTimer == timer and inMission() do
             timer.leaving = true
             if stopMissionFarm then stopMissionFarm() end
             local assets = ReplicatedStorage:FindFirstChild("Assets")
@@ -2095,7 +2098,9 @@ local function startMissionFarm()
                     local watcher = env.AutoPrestigeRewardsWatcher
                     local gold = watcher and watcher.balance and watcher.balance()
                     local prestigeGold = timer and timer.prestigeGoldTarget
-                    local boostExpired = timer and goldBoostExpired(timer, player)
+                    -- Gold Boost can never trigger a Lobby return unless it is enabled.
+                    local boostExpired = configEnv.UseGoldBoost and timer
+                        and goldBoostExpired(timer, player)
 
                     -- Check if we should return to Lobby instead of retrying
                     if boostExpired then
@@ -2155,20 +2160,19 @@ local function startMissionFarm()
                         end
                     end
 
-                    -- Nút "RETRY (0/1)" = đã dùng 0/1 lượt, còn 1 lượt -> vẫn retry được.
+                    -- Nút "RETRY (x/y)" không rõ đang đếm lượt đã dùng hay lượt còn lại, nên luôn
+                    -- thử Retry trước: chỉ LEAVE khi đã bấm Retry >= 5 lần mà trận vẫn không
+                    -- khởi động lại (màn hình Rewards còn hiện).
                     local used, total = retryUsage(rewards)
                     local exhausted = used ~= nil and total ~= nil and used >= total
-                    -- MISSION FAILED mới cần thoát khi bấm retry mãi không ăn; COMPLETED thì cứ retry.
                     local stateLabel = path(main, {"Info", "State"})
                     local stateText = (stateLabel and stateLabel.Text or ""):upper()
                     local failed = stateText:find("FAIL", 1, true) ~= nil
-                    -- Vừa bấm retry của mình nên bộ đếm lên 1/1: đang chờ "STARTING", không bấm LEAVE.
-                    if (exhausted and not clickedRetry) or (failed and retryCount >= 20) then
-                        print("[AUTO PRESTIGE] Không retry được ("
-                            .. (exhausted and not clickedRetry
-                                and ("RETRY " .. tostring(used) .. "/" .. tostring(total) .. " đã dùng hết")
-                                or "retry không phản hồi")
-                            .. "). Bấm LEAVE để về Lobby!")
+                    if (exhausted and clickedRetry and retryCount >= 5)
+                        or (failed and retryCount >= 20) then
+                        print("[AUTO PRESTIGE] Đã Retry " .. retryCount .. " lần nhưng trận không khởi động lại"
+                            .. (exhausted and (" (RETRY " .. tostring(used) .. "/" .. tostring(total) .. ")") or "")
+                            .. ". Bấm LEAVE để về Lobby!")
                         if stopMissionFarm then stopMissionFarm() end
                         triggerLeaveButton(rewards)
                         task.wait(5)
@@ -2572,12 +2576,13 @@ local function chooseGoldPotion(balance, products, remainingSeconds)
 end
 
 local function purchaseGoldPotion(player)
-    print("[POTION] Effective config: UseGoldBoost=" .. tostring(configEnv.UseGoldBoost)
-        .. " | GoldPotionHours=" .. tostring(configEnv.GoldPotionHours))
-    if not configEnv.UseGoldBoost or configEnv.GoldPotionHours == 0 then
-        print("[POTION] Disabled by effective config; skipping.")
+    -- Silently skip when the feature is off: no [POTION] log, no timers, no purchases.
+    if not configEnv.UseGoldBoost or not configEnv.GoldPotionHours
+        or configEnv.GoldPotionHours <= 0 then
         return
     end
+    print("[POTION] Effective config: UseGoldBoost=" .. tostring(configEnv.UseGoldBoost)
+        .. " | GoldPotionHours=" .. tostring(configEnv.GoldPotionHours))
     local targetSeconds = configEnv.GoldPotionHours * 3600
     local interface = awaitPath(player, {"PlayerGui", "Interface"})
     local function timer()
@@ -2726,10 +2731,11 @@ local function waitLobbyAutoexec(player)
     repeat
         local ui = findPath(player, {"PlayerGui", "Interface"})
         local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+        local boostReady = not configEnv.UseGoldBoost or findPath(player, {"Boosts", "Gold"}) ~= nil
         local ready = root and ui and findPath(ui, {"Topbar", "Main", "Categories", "Equipment", "Interact"})
             and findPath(ui, {"Topbar", "Main", "Categories", "Market", "Interact"})
             and ui:FindFirstChild("Equipment") and ui:FindFirstChild("Market")
-            and findPath(player, {"Boosts", "Gold"})
+            and boostReady
         if ready and ui == previousUI then
             stableSince = stableSince or os.clock()
         else
@@ -2749,7 +2755,9 @@ local function runPrestigeFlow()
     -- A new execution resumes the appropriate branch after each place teleport.
     if inMission() then
         print("[AUTO PRESTIGE] Map: Auto Farm + Retry + Skip + Rewards Webhook.")
-        print("[POTION] Mission branch: top-up purchases run in Lobby, not inside missions.")
+        if configEnv.UseGoldBoost then
+            print("[POTION] Mission branch: top-up purchases run in Lobby, not inside missions.")
+        end
         startRewardsWebhook()
         startLobbyTimer()
         startMissionFarm()
@@ -2768,9 +2776,17 @@ local function runPrestigeFlow()
 
     -- Background balance capture must run in Lobby too, to carry Gold/Gems into map.
     startRewardsWebhook()
-    print("[AUTO PRESTIGE] Lobby: Gold Potion -> Prestige -> Upgrades.")
-    -- Prestige is checked before Upgrade All can spend the threshold balance.
-    ensureGoldPotion(player)
+    if configEnv.UseGoldBoost then
+        print("[AUTO PRESTIGE] Lobby: Gold Potion -> Prestige -> Upgrades.")
+        -- Prestige is checked before Upgrade All can spend the threshold balance.
+        ensureGoldPotion(player)
+    else
+        print("[AUTO PRESTIGE] Lobby: Prestige -> Upgrades (Gold Potion tắt, không mua boost).")
+        -- Clear proof-of-use left over from an earlier run so nothing can ever read it
+        -- as "the potion just expired" after the boost was disabled.
+        local lobbyEnv = type(getgenv) == "function" and getgenv() or _G
+        lobbyEnv.AutoPrestigeGoldPotionUsed = nil
+    end
     -- A missing or zero Gold Boost must not stop the run: a fresh account has to
     -- farm Gems without a boost before it can buy one.
     if configEnv.UseGoldBoost and configEnv.GoldPotionHours and configEnv.GoldPotionHours > 0 then
