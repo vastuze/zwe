@@ -1016,6 +1016,7 @@ local function tryPrestige(player)
             local liveData = readLiveData(player)
             if liveData then
                 local pRank = liveData.Rank or liveData.Prestige
+                    or (liveData.Progression and liveData.Progression.Prestige)
                     or (liveData.Slots and liveData.Current_Slot and liveData.Slots[liveData.Current_Slot] and (liveData.Slots[liveData.Current_Slot].Rank or liveData.Slots[liveData.Current_Slot].Prestige))
                 if type(pRank) == "number" then
                     rankFromData = pRank
@@ -1038,8 +1039,11 @@ local function tryPrestige(player)
         end
     end
 
-    local rank = readRank() or 0
-    saveRank(rank)
+    local readValue = readRank()
+    local rank = readValue or 0
+    -- Chỉ ghi file khi thật sự đọc được rank. Đọc lỗi mà ghi 0 sẽ làm hỏng mốc Prestige
+    -- (webhook hiện "Prestige: 0" và mission tính mốc P1 sai).
+    if readValue ~= nil then saveRank(rank) end
     if not ranks[rank + 1] then
         print("[AUTO PRESTIGE] Highest rank reached (no rank " .. tostring(rank + 1) .. ").")
         return
@@ -1067,13 +1071,18 @@ local function tryPrestige(player)
     print(string.format("[AUTO PRESTIGE] Prestige rank = %d (%s) | Gold %s | Target P%d = %s",
         rank, tostring(rankTag), tostring(gold), rank + 1, tostring(target)))
     local currentLvl = readPlayerLevel(player)
-    if currentLvl and currentLvl < 100 then
+    if type(currentLvl) == "number" and currentLvl < 100 then
         print(string.format("[AUTO PRESTIGE] Prestige skipped: Level hiện tại %d chưa đạt Level 100.", currentLvl))
         return
     end
-    if target > 0 and (type(gold) ~= "number" or gold < target) then
-        print("[AUTO PRESTIGE] Prestige skipped: Gold below target or exact balance unavailable.")
+    if target > 0 and type(gold) == "number" and gold < target then
+        print(string.format("[AUTO PRESTIGE] Prestige skipped: Vàng %s < mốc P%d = %s.",
+            tostring(gold), rank + 1, tostring(target)))
         return
+    end
+    if type(gold) ~= "number" then
+        -- Không đọc được số dư thì để server quyết định, không chặn oan.
+        print("[AUTO PRESTIGE] Không đọc được số dư Vàng; vẫn thử Prestige, server từ chối nếu thiếu.")
     end
     -- ========================================================
     -- THỰC HIỆN PRESTIGE 100% BẰNG REMOTE (KHÔNG CLICK)
@@ -1114,9 +1123,27 @@ local function tryPrestige(player)
             end
         end
     end
-    if #rolledIDs == 0 then
-        rolledIDs = {"18", "3", "2"}
+    -- Bản cũ chỉ lấy thẻ trong workspace.Objects.Blackout.Memories (thường rỗng vì script
+    -- không mở panel Prestige) nên gửi Talent sai -> server trả nil -> Prestige không chạy.
+    -- Thứ tự đúng: Next_Talents có sẵn -> thẻ đang hiện trên UI -> roll mới -> 18, 3, 2.
+    local talentList
+    local liveData = readLiveData(player)
+    if liveData and type(liveData.Next_Talents) == "table" and #liveData.Next_Talents > 0 then
+        talentList = liveData.Next_Talents
+    elseif #rolledIDs > 0 then
+        talentList = rolledIDs
+    else
+        local okRoll, rolled = pcall(function()
+            return Event:InvokeServer("S_Equipment", "Talents")
+        end)
+        if okRoll and type(rolled) == "table" and #rolled > 0 then
+            talentList = rolled
+        else
+            talentList = {"18", "3", "2"}
+        end
     end
+    local okList, listText = pcall(table.concat, talentList, ", ")
+    print("[AUTO PRESTIGE] Talent dùng để Prestige: " .. (okList and listText or "?"))
 
     local talentTags = {}
     local function getTalentInfo(id)
@@ -1131,13 +1158,17 @@ local function tryPrestige(player)
         return tostring(id), "Unknown", 1
     end
 
-    for _, id in ipairs(rolledIDs) do
+    for _, id in ipairs(talentList) do
         local tag, rarity, stars = getTalentInfo(id)
-        table.insert(talentTags, {ID = id, Tag = tag})
+        table.insert(talentTags, {ID = tostring(id), Tag = tostring(tag)})
         print(string.format("[AUTO PRESTIGE] [Talent] ID %s -> Tag: '%s' (%s, %d sao)", tostring(id), tag, rarity, stars or 1))
     end
 
     local picked = talentTags[1]
+    if not picked then
+        warn("[AUTO PRESTIGE] Không có Talent nào để chọn; bỏ lượt Prestige này.")
+        return
+    end
     print(string.format("[AUTO PRESTIGE] [★] CHỌN THẺ ĐỂ PRESTIGE: '%s' (ID %s)", picked.Tag, picked.ID))
 
     local selection = {
@@ -1145,19 +1176,35 @@ local function tryPrestige(player)
         ["Talents"] = picked.Tag
     }
 
-    print(string.format("[AUTO PRESTIGE] Gửi Remote: Boosts = '%s' | Talents = '%s'...", selection.Boosts, selection.Talents))
-
+    print(string.format("[AUTO PRESTIGE] Thử 1: Boosts = '%s' | Talents = '%s'", selection.Boosts, selection.Talents))
     local ok, finalData, skillPoints, rankId = pcall(function()
         return Event:InvokeServer("S_Equipment", "Prestige", selection)
     end)
 
-    -- Dự phòng: Nếu Server muốn nhận ID dạng số thay vì chữ
+    -- Dự phòng 2: server nhận ID thay vì Tag
     if ok and finalData == nil then
-        print("[AUTO PRESTIGE] Thử lại phương án 2: Gửi ID thay vì Tag...")
-        selection.Talents = tostring(picked.ID)
+        selection.Talents = picked.ID
+        print("[AUTO PRESTIGE] Thử 2: Talents = ID '" .. selection.Talents .. "'")
         ok, finalData, skillPoints, rankId = pcall(function()
             return Event:InvokeServer("S_Equipment", "Prestige", selection)
         end)
+    end
+
+    -- Dự phòng 3 + 4: Boosts cũng là dạng ID ("1")
+    if ok and finalData == nil then
+        selection.Boosts = "1"
+        selection.Talents = picked.Tag
+        print("[AUTO PRESTIGE] Thử 3: Boosts = '1' | Talents = '" .. selection.Talents .. "'")
+        ok, finalData, skillPoints, rankId = pcall(function()
+            return Event:InvokeServer("S_Equipment", "Prestige", selection)
+        end)
+        if ok and finalData == nil then
+            selection.Talents = picked.ID
+            print("[AUTO PRESTIGE] Thử 4: Boosts = '1' | Talents = ID '" .. selection.Talents .. "'")
+            ok, finalData, skillPoints, rankId = pcall(function()
+                return Event:InvokeServer("S_Equipment", "Prestige", selection)
+            end)
+        end
     end
 
     if ok and type(finalData) == "table" and finalData.Progression then
@@ -1613,7 +1660,59 @@ local function boostsText()
     return #lines > 0 and table.concat(lines, "\n"):sub(1, 1000) or "Khong co du lieu boost"
 end
 
+-- Check Prestige theo logic đã test riêng: Core.Update (Progression.Prestige)
+-- -> UI Equipment.Prestige.Progress.Title -> getgc (quét RAM) -> ledger đã lưu.
+local function readGamePrestige()
+    local liveData = readLiveData(player)
+    if liveData then
+        local prog = liveData.Progression
+            or (liveData.Slots and liveData.Current_Slot and liveData.Slots[liveData.Current_Slot]
+                and liveData.Slots[liveData.Current_Slot].Progression)
+        if prog and type(prog.Prestige) == "number" then
+            return prog.Prestige, prog.Level, "Core.Update"
+        end
+        if type(liveData.Prestige) == "number" then
+            return liveData.Prestige, nil, "Core.Update"
+        end
+    end
+
+    local gui = player and player:FindFirstChild("PlayerGui")
+    local interface = gui and gui:FindFirstChild("Interface")
+    local equipment = interface and interface:FindFirstChild("Equipment")
+    local title = equipment and findPath(equipment, {"Prestige", "Progress", "Title"})
+    if title and title.Text ~= "" then
+        local text = title.Text:gsub("<[^>]*>", ""):upper():match("^%s*(.-)%s*$")
+        if text == "ENLIST" then return 0, nil, "UI Title" end
+        local ranks
+        pcall(function() ranks = require(ReplicatedStorage.Modules.Storage.Ranks) end)
+        if type(ranks) == "table" then
+            for index, rank in pairs(ranks) do
+                if type(rank) == "table" and rank.Tag and text == tostring(rank.Tag):upper() then
+                    return index, nil, "UI Title"
+                end
+            end
+        end
+    end
+
+    if type(getgc) == "function" then
+        local found
+        pcall(function()
+            for _, obj in pairs(getgc(true)) do
+                if type(obj) == "table" then
+                    local prog = rawget(obj, "Progression")
+                    if type(prog) == "table" and type(prog.Prestige) == "number" then
+                        found = {Prestige = prog.Prestige, Level = prog.Level}
+                        break
+                    end
+                end
+            end
+        end)
+        if found then return found.Prestige, found.Level, "getgc" end
+    end
+end
+
 local function prestigeText()
+    local liveRank, liveLevel, liveSource = readGamePrestige()
     local saved = configEnv.AutoPrestigeRank
     if type(saved) ~= "table" and type(readfile) == "function" then
         local ok, value = pcall(function()
@@ -1621,34 +1720,87 @@ local function prestigeText()
         end)
         if ok then saved = value end
     end
-    if type(saved) == "table" and saved.userId == player.UserId and saved.gameId == game.GameId
+    local rank
+    if type(liveRank) == "number" then
+        rank = liveRank
+        print(string.format("[WEBHOOK] Prestige doc tu %s: %d%s", tostring(liveSource), liveRank,
+            liveLevel and (" (Level " .. tostring(liveLevel) .. ")") or ""))
+    elseif type(saved) == "table" and saved.userId == player.UserId and saved.gameId == game.GameId
         and type(saved.rank) == "number" and saved.rank >= 0 and saved.rank < math.huge
         and saved.rank % 1 == 0 then
-        local rank = saved.rank
-        local tag
-        pcall(function()
-            local module = ReplicatedStorage:FindFirstChild("Modules")
-                and ReplicatedStorage.Modules:FindFirstChild("Storage")
-                and ReplicatedStorage.Modules.Storage:FindFirstChild("Ranks")
-            if module then
-                local ranks = require(module)
-                if type(ranks) == "table" and type(ranks[rank]) == "table" then tag = ranks[rank].Tag end
-            end
-        end)
-        return tag and (tostring(rank) .. " (" .. tag .. ")") or tostring(rank)
+        rank = saved.rank
     end
-    return "Chua xac nhan Prestige tai Lobby"
+    if rank == nil then return "Chua xac nhan Prestige tai Lobby" end
+    local tag
+    pcall(function()
+        local module = ReplicatedStorage:FindFirstChild("Modules")
+            and ReplicatedStorage.Modules:FindFirstChild("Storage")
+            and ReplicatedStorage.Modules.Storage:FindFirstChild("Ranks")
+        if module then
+            local ranks = require(module)
+            if type(ranks) == "table" and type(ranks[rank]) == "table" then tag = ranks[rank].Tag end
+        end
+    end)
+    return tag and (tostring(rank) .. " (" .. tag .. ")") or tostring(rank)
+end
+
+-- Check Grade theo logic đã test riêng: Shared.Get_Potential -> Equipment Module ->
+-- đọc thẳng object UI (Title "UPGRADES [S- GRADE]" / Stat panel "[S-]"), đọc được cả khi panel đóng.
+local function readGameGrade()
+    local values
+    pcall(function() values = require(ReplicatedStorage.Modules.Storage.Values) end)
+
+    local potential
+    pcall(function()
+        local shared = require(ReplicatedStorage.Modules.Shared.Shared)
+        if type(shared) == "table" and type(shared.Get_Potential) == "function" then
+            local pot = shared.Get_Potential(nil, player)
+            if type(pot) == "number" then potential = pot end
+        end
+    end)
+    if type(potential) ~= "number" then
+        pcall(function()
+            local eq = require(ReplicatedStorage.Modules["User Interface"].Equipment)
+            if type(eq) == "table" and type(eq.Potential) == "number" then potential = eq.Potential end
+        end)
+    end
+    if type(potential) == "number" and values and values.Pot_Tags and values.Pot_Tags[potential] then
+        return values.Pot_Tags[potential], "Shared/Equipment Module (Pot " .. tostring(potential) .. ")"
+    end
+
+    local gui = player and player:FindFirstChild("PlayerGui")
+    local interface = gui and gui:FindFirstChild("Interface")
+    local equipment = interface and interface:FindFirstChild("Equipment")
+    if equipment then
+        local title = findPath(equipment, {"Categories", "Upgrades", "Main", "Title"})
+        if title and title.Text ~= "" then
+            local text = title.Text:gsub("<[^>]*>", "")
+            local tag = text:match("%[([A-S][%+%-]?)%s*GRADE%]") or text:match("%[([^%]]+)%]")
+            if tag and tag ~= "" then return tag, "UI Title" end
+        end
+        local current = findPath(equipment, {"Stat", "Inner", "Upgrade_Values", "Current"})
+        if current and current.Text ~= "" then
+            local tag = current.Text:gsub("<[^>]*>", ""):match("%[([A-S][%+%-]?)%]")
+            if tag then return tag, "UI Stat Panel" end
+        end
+    end
 end
 
 local function getPlayerGradeText()
-    local potential, values = readGradeIndex(player)
-    local tag
-    if type(potential) == "number" and values and values.Pot_Tags and values.Pot_Tags[potential] then
-        tag = values.Pot_Tags[potential]
+    local tag, source = readGameGrade()
+    if tag then
+        print("[WEBHOOK] Grade doc tu " .. tostring(source) .. ": [" .. tostring(tag) .. "]")
+    end
+    local watcher = configEnv.AutoPrestigeRewardsWatcher
+    if not tag then
+        local okPot, potential, values = pcall(readGradeIndex, player)
+        if okPot and type(potential) == "number" and values and values.Pot_Tags
+            and values.Pot_Tags[potential] then
+            tag = values.Pot_Tags[potential]
+        end
     end
     if not tag then tag = readGradeFromUI(player) end
     -- Place mission không có Core.Update/UI: lấy Grade đã lưu trong ledger (cùng chỗ Gold/Gems).
-    local watcher = configEnv.AutoPrestigeRewardsWatcher
     if not tag and watcher and watcher.grade then tag = watcher.grade() end
     if not tag then
         local env = type(getgenv) == "function" and getgenv() or _G
@@ -2091,32 +2243,12 @@ local function startMissionFarm()
             return true
         end
 
-        local function triggerRetryButton(rewards)
-            return fireButton(findRewardButton(rewards, "retry"))
-        end
-
         local function triggerLeaveButton(rewards)
             return fireButton(findRewardButton(rewards, "leave"))
         end
 
-        -- Text hiển thị của nút: ưu tiên TextButton.Text, không có thì lấy label con tên "Title".
-        local function buttonText(button)
-            if not button then return "" end
-            if button:IsA("TextButton") and button.Text ~= "" then return button.Text end
-            local title = button:FindFirstChild("Title")
-            if title and title:IsA("TextLabel") then return title.Text end
-            return ""
-        end
-
-        -- Nút ghi "RETRY (0/1)": 0 = số lượt đã dùng, 1 = tổng số lượt. 0/1 nghĩa là còn 1 lượt.
-        local function retryUsage(rewards)
-            local used, total = buttonText(findRewardButton(rewards, "retry")):match("%((%d+)%s*/%s*(%d+)%)")
-            return tonumber(used), tonumber(total)
-        end
-
         local retryCount = 0
         local lastRetryTime = 0
-        local clickedRetry = false
         while inMission() do
             task.wait(0.2)
             local rewards = path(player, {"PlayerGui", "Interface", "Rewards"})
@@ -2215,18 +2347,13 @@ local function startMissionFarm()
                         end
                     end
 
-                    -- Nút "RETRY (x/y)" không rõ đang đếm lượt đã dùng hay lượt còn lại, nên luôn
-                    -- thử Retry trước: chỉ LEAVE khi đã bấm Retry >= 5 lần mà trận vẫn không
-                    -- khởi động lại (màn hình Rewards còn hiện).
-                    local used, total = retryUsage(rewards)
-                    local exhausted = used ~= nil and total ~= nil and used >= total
-                    local stateLabel = path(main, {"Info", "State"})
-                    local stateText = (stateLabel and stateLabel.Text or ""):upper()
-                    local failed = stateText:find("FAIL", 1, true) ~= nil
-                    if (exhausted and clickedRetry and retryCount >= 5)
-                        or (failed and retryCount >= 20) then
-                        print("[AUTO PRESTIGE] Đã Retry " .. retryCount .. " lần nhưng trận không khởi động lại"
-                            .. (exhausted and (" (RETRY " .. tostring(used) .. "/" .. tostring(total) .. ")") or "")
+                    -- Retry chỉ dùng RemoteFunction GET (không click / không firesignal nút Rewards).
+                    -- Màn Rewards còn hiện sau 8 lần gửi (~12 giây) = server không nhận -> LEAVE.
+                    if retryCount >= 8 then
+                        local stateLabel = path(main, {"Info", "State"})
+                        local stateText = stateLabel and stateLabel.Text or ""
+                        print("[AUTO PRESTIGE] Đã gửi Retry " .. retryCount .. " lần nhưng trận không chạy lại"
+                            .. (stateText ~= "" and (" (" .. stateText .. ")") or "")
                             .. ". Bấm LEAVE để về Lobby!")
                         if stopMissionFarm then stopMissionFarm() end
                         triggerLeaveButton(rewards)
@@ -2241,33 +2368,27 @@ local function startMissionFarm()
                         return
                     end
 
-                    -- If not leaving to Lobby: Send Retry (retry every 1.5s while Rewards is visible)
+                    -- Retry: ReplicatedStorage.Assets.Remotes.GET:InvokeServer("Functions", "Retry", "Add")
                     if os.clock() - lastRetryTime >= 1.5 then
                         lastRetryTime = os.clock()
                         retryCount = retryCount + 1
-                        print(string.format("[AUTO PRESTIGE] Rewards screen visible: Gửi yêu cầu Retry lần %d...", retryCount))
-
                         local get = remote("GET")
                         if get and get:IsA("RemoteFunction") then
                             local ok, res = pcall(function() return get:InvokeServer("Functions", "Retry", "Add") end)
-                            if not ok then warn("[AUTO PRESTIGE] GET Retry failed: " .. tostring(res)) end
-                        end
-
-                        local post = remote("POST")
-                        if post then pcall(function() post:FireServer("Functions", "Retry", "Add") end) end
-                        if post then pcall(function() post:FireServer("Functions", "Retry") end) end
-
-                        local clicked = triggerRetryButton(rewards)
-                        if clicked then
-                            clickedRetry = true
-                            print("[AUTO PRESTIGE] Đã kích hoạt nút Retry trên giao diện Rewards!")
+                            if ok then
+                                print(string.format("[AUTO PRESTIGE] Retry remote lần %d -> %s",
+                                    retryCount, tostring(res)))
+                            else
+                                warn("[AUTO PRESTIGE] Retry remote lần " .. retryCount .. " lỗi: " .. tostring(res))
+                            end
+                        else
+                            warn("[AUTO PRESTIGE] GET RemoteFunction not found; cannot retry.")
                         end
                     end
                 end
             else
                 retryCount = 0
                 lastRetryTime = 0
-                clickedRetry = false
             end
         end
     end)
