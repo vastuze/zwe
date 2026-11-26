@@ -683,15 +683,41 @@ end
 local function readGamePrestige(targetPlayer)
     local p = targetPlayer or Players.LocalPlayer
 
+    -- Ưu tiên 1: Click Equipment > Prestige tab và đọc title (đáng tin nhất)
     local gui = p and p:FindFirstChild("PlayerGui")
     local interface = gui and gui:FindFirstChild("Interface")
-    local equipment = interface and interface:FindFirstChild("Equipment")
-    local title = equipment and findPath(equipment, {"Prestige", "Progress", "Title"})
-    if title and title.Text ~= "" then
-        local rank = prestigeRankFromTag(title.Text)
-        if type(rank) == "number" then return rank, nil, "UI Title" end
+    if interface then
+        local function clickOnce(target)
+            if target and target:IsA("GuiButton") then
+                if type(firesignal) == "function" then
+                    firesignal(target.MouseButton1Click)
+                else
+                    local pos = target.AbsolutePosition + target.AbsoluteSize / 2
+                    local vim = game:GetService("VirtualInputManager")
+                    vim:SendMouseButtonEvent(pos.X, pos.Y, 0, true, game, 1)
+                    task.wait(0.05)
+                    vim:SendMouseButtonEvent(pos.X, pos.Y, 0, false, game, 1)
+                end
+            end
+        end
+        local eqBtn = findPath(interface, {"Topbar", "Main", "Categories", "Equipment", "Interact"})
+        local equipment = interface:FindFirstChild("Equipment")
+        local wasOpen = equipment and equipment.Visible
+        if eqBtn and not wasOpen then clickOnce(eqBtn); task.wait(0.7) end
+        equipment = interface:FindFirstChild("Equipment")
+        if equipment then
+            -- Click sang tab Prestige
+            local prestigeTab = findPath(equipment, {"Categories", "Prestige", "Main", "Interact"})
+            if prestigeTab then clickOnce(prestigeTab); task.wait(0.5) end
+            local title = findPath(equipment, {"Prestige", "Progress", "Title"})
+            local rank = title and title.Text ~= "" and prestigeRankFromTag(title.Text)
+            -- Đóng lại nếu ta đã mở
+            if eqBtn and not wasOpen then task.wait(0.1); clickOnce(eqBtn) end
+            if type(rank) == "number" then return rank, nil, "UI Prestige Tab" end
+        end
     end
 
+    -- Fallback: Core.Update
     local liveData = readLiveData(p)
     if liveData then
         local prog = liveData.Progression
@@ -703,22 +729,6 @@ local function readGamePrestige(targetPlayer)
         if type(liveData.Prestige) == "number" and liveData.Prestige > 0 then
             return liveData.Prestige, nil, "Core.Update"
         end
-    end
-
-    if type(getgc) == "function" then
-        local gcRank, gcLevel
-        pcall(function()
-            for _, obj in pairs(getgc(true)) do
-                if type(obj) == "table" then
-                    local prog = rawget(obj, "Progression")
-                    if type(prog) == "table" and type(prog.Prestige) == "number"
-                        and prog.Prestige > 0 and (gcRank == nil or prog.Prestige > gcRank) then
-                        gcRank, gcLevel = prog.Prestige, prog.Level
-                    end
-                end
-            end
-        end)
-        if gcRank then return gcRank, gcLevel, "getgc" end
     end
 end
 
@@ -1117,13 +1127,13 @@ local function readDifficulty(player, initialGrade, initialPotential)
         end
     end
 
-    -- 6b. Lưu Prestige vào ledger y như Grade, để place mission (không đọc live được)
-    -- vẫn hiện đúng trên webhook.
+    -- 6b. Lưu Prestige vào ledger (chỉ đọc 1 lần, không spam log)
+    -- readGamePrestige đã được gọi trước đó (tryPrestige) nên chỉ dùng lại từ env
     if watcher and watcher.setRank then
-        local liveRank = readGamePrestige(player)
-        if type(liveRank) == "number" then
-            print("[AUTO PRESTIGE] Prestige live (Lobby): " .. tostring(liveRank))
-            pcall(watcher.setRank, liveRank)
+        local env2 = type(getgenv) == "function" and getgenv() or _G
+        local saved = env2.AutoPrestigeRank
+        if saved and type(saved.rank) == "number" and saved.rank > 0 then
+            pcall(watcher.setRank, saved.rank)
         end
     end
 
@@ -2641,7 +2651,11 @@ local function startMissionFarm()
                     root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
                     root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
                 end
-                print("[AUTO PRESTIGE] Blades empty: Teleport refill -> Reload remote -> wait 0.5s -> return (unanchored).")
+                -- In log refill tối đa 1 lần mỗi 60 giây để tránh spam
+                if os.clock() - lastRefillWarning >= 60 then
+                    lastRefillWarning = os.clock()
+                    print("[AUTO PRESTIGE] Blades empty -> refilling.")
+                end
                 local refillOK, refillError = pcall(function()
                     stopHeightGuard()
                     clearRefillHold()
@@ -3074,7 +3088,7 @@ local function ensureGoldPotion(player)
 end
 
 local function waitLobbyAutoexec(player)
-    print("[AUTO PRESTIGE] Autoexec: waiting at least 15 seconds for Lobby initialization...")
+    print("[AUTO PRESTIGE] Autoexec: waiting at least 5 seconds for Lobby initialization...")
     local started = os.clock()
     local stableSince, previousUI
     repeat
@@ -3091,7 +3105,7 @@ local function waitLobbyAutoexec(player)
             stableSince = nil
         end
         previousUI = ui
-        if stableSince and os.clock() - stableSince >= 3 and os.clock() - started >= 15 then
+        if stableSince and os.clock() - stableSince >= 2 and os.clock() - started >= 5 then
             print("[AUTO PRESTIGE] Lobby UI loaded; starting menu setup.")
             return
         end
