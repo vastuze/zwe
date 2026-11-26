@@ -2677,7 +2677,7 @@ local function startMissionFarm()
                     hold.Parent = root
                     farm.refillHold = hold
                 end
-                print("[AUTO PRESTIGE] Blades empty -> teleport station -> Reload -> wait 1s -> return high.")
+                print("[AUTO PRESTIGE] Blades empty -> teleport station -> wait 0.5s -> Reload -> wait 0.5s -> return high.")
                 local refillOK, refillError = pcall(function()
                     stopHeightGuard()
                     clearRefillHold()
@@ -2685,8 +2685,14 @@ local function startMissionFarm()
                     root.CFrame = station.CFrame + Vector3.new(0, 3, 0)
                     root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
                     root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-                    post:FireServer("Attacks", "Reload", station)
-                    task.wait(1)
+                    task.wait(0.5)
+                    if valid() then
+                        post:FireServer("Attacks", "Reload", station)
+                        print("[AUTO PRESTIGE] Refill remote sent -> " .. station:GetFullName())
+                    else
+                        refillWarning("Character/farm became invalid during 0.5s wait; Reload remote skipped.")
+                    end
+                    task.wait(0.5)
                 end)
                 restore()
                 local newSets, newSegments = bladeStatus(character)
