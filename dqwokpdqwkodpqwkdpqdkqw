@@ -2604,7 +2604,7 @@ local function startMissionFarm()
         return path(titan, {"Hitboxes", "Hit", "Nape"}) or titan:FindFirstChild("Nape", true)
     end
     local lastRefillWarning = -10
-    local emptySince, emptyCharacter
+    local refillCharacter, refillPending
     local function refillWarning(message)
         if os.clock() - lastRefillWarning >= 10 then
             lastRefillWarning = os.clock()
@@ -2633,12 +2633,21 @@ local function startMissionFarm()
         end
         local setsLeft, segmentsLeft = bladeStatus(character)
         if setsLeft == nil then
-            emptySince, emptyCharacter = nil, nil
+            -- Missing replication is not proof of a completed refill; keep the latch.
             refillWarning("Blade slots not replicated; cannot determine remaining sets.")
             reportFarmWait("blade reserve slots not replicated")
             release(); task.wait(0.1); return
         end
         if setsLeft == 0 and segmentsLeft == 0 then
+            -- Sau một lần refill, không teleport lại cho tới khi game replicate lưỡi mới.
+            -- Đây là chặn loop: refillPending chỉ được xoá khi bladeStatus() đã khác 0/0.
+            if refillPending and refillCharacter == character then
+                reportFarmWait("waiting for Reload replication")
+                task.wait(0.1)
+                return
+            end
+            refillPending = true
+            refillCharacter = character
             local station, post = getRefillPart(), remote("POST")
             if station and post and post:IsA("RemoteEvent") and valid() then
                 local oldCF = root.CFrame
@@ -2651,11 +2660,7 @@ local function startMissionFarm()
                     root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
                     root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
                 end
-                -- In log refill tối đa 1 lần mỗi 60 giây để tránh spam
-                if os.clock() - lastRefillWarning >= 60 then
-                    lastRefillWarning = os.clock()
-                    print("[AUTO PRESTIGE] Blades empty -> refilling.")
-                end
+                print("[AUTO PRESTIGE] Blades empty -> one Reload teleport; waiting for replication.")
                 local refillOK, refillError = pcall(function()
                     stopHeightGuard()
                     clearRefillHold()
@@ -2664,19 +2669,25 @@ local function startMissionFarm()
                     root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
                     root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
                     post:FireServer("Attacks", "Reload", station)
-                    task.wait(0.5)
+                    task.wait(0.1)
                 end)
                 restore()
-                if not refillOK then refillWarning("Reload failed: " .. tostring(refillError)) end
-                emptySince, emptyCharacter = nil, nil
+                if not refillOK then
+                    -- The teleport was already attempted; never repeat it for this empty cycle.
+                    refillWarning("Reload attempt failed; automatic teleport retry disabled: " .. tostring(refillError))
+                end
             else
+                refillPending = false
+                refillCharacter = nil
                 refillWarning(not station and "HQ refill part not found."
                     or "POST remote or character not ready.")
                 task.wait(0.5)
             end
             return
         end
-        emptySince, emptyCharacter = nil, nil
+        -- Blade status changed: the one refill succeeded/replicated; farm may resume.
+        refillPending = false
+        refillCharacter = nil
         clearRefillHold()
         local titans = workspace:FindFirstChild("Titans")
         local target, nape, nearest = nil, nil, math.huge
