@@ -198,6 +198,39 @@ local function prestigeTarget(player)
     end
 end
 
+-- getgenv() does not survive a Lobby <-> mission teleport, so the Prestige check
+-- cooldown is also written to a file next to the prestige rank file.
+local function prestigeCheckFile(player)
+    return "auto_prestige_check_" .. tostring(game.GameId) .. "_" .. tostring(player.UserId) .. ".json"
+end
+
+local function prestigeCheckAt(player)
+    local env = type(getgenv) == "function" and getgenv() or _G
+    local at = tonumber(env.AutoPrestigeNextCheck) or 0
+    if type(readfile) == "function" then
+        local ok, saved = pcall(function()
+            return game:GetService("HttpService"):JSONDecode(readfile(prestigeCheckFile(player)))
+        end)
+        if ok and type(saved) == "table" and saved.userId == player.UserId
+            and saved.gameId == game.GameId and type(saved.nextCheckAt) == "number" then
+            at = math.max(at, saved.nextCheckAt)
+        end
+    end
+    return at
+end
+
+local function setPrestigeCheckAt(player, at)
+    local env = type(getgenv) == "function" and getgenv() or _G
+    env.AutoPrestigeNextCheck = at
+    if type(writefile) == "function" then
+        pcall(function()
+            writefile(prestigeCheckFile(player), game:GetService("HttpService"):JSONEncode({
+                userId = player.UserId, gameId = game.GameId, nextCheckAt = at,
+            }))
+        end)
+    end
+end
+
 local function gradeTagFromText(raw)
     if type(raw) ~= "string" or raw == "" then return nil end
     local text = raw:gsub("<[^>]*>", ""):upper()
@@ -806,6 +839,7 @@ local function readDifficulty(player)
     if type(remotePotential) == "number" and (not livePotential or remotePotential > livePotential) then
         livePotential = remotePotential
     end
+    local liveVerified = type(livePotential) == "number"
     if type(livePotential) == "number" then
         gradeIndex = livePotential
         grade = values.Pot_Tags[gradeIndex] or (gradeIndex >= 15 and "S-" or "?")
@@ -912,10 +946,14 @@ local function readDifficulty(player)
     pcall(unlockSkillChain, player)
 
     -- 6. Lưu Grade vào ledger webhook (Gold/Gems) để place mission đọc lại được.
+    -- Grade đọc từ dữ liệu live/Remote phải luôn ghi đè ledger. Trước đây chỉ ghi khi
+    -- có nâng cấp (upgradeRounds > 0), nên acc đã Max Grade (không còn gì để mua) giữ
+    -- mãi Grade cũ trong file; mission đọc Grade cũ đó, thấy "đủ vàng" và lại về Lobby
+    -- nâng Grade vô ích mỗi trận.
     local watcher = env.AutoPrestigeRewardsWatcher
     if watcher and watcher.setGrade and type(gradeIndex) == "number" and grade then
         local stored = watcher.grade and watcher.grade()
-        if (upgradeRounds or 0) > 0 or not stored then watcher.setGrade(grade) end
+        if liveVerified or (upgradeRounds or 0) > 0 or not stored then watcher.setGrade(grade) end
     end
 
     -- 7. Cập nhật số dư vàng vào ledger
@@ -2114,15 +2152,30 @@ local function startMissionFarm()
                         return
                     end
 
-                    -- Kiểm tra điều kiện đủ Level (>= 100) & đủ Vàng để Prestige
+                    -- Prestige cần Level >= 100 nhưng place mission không đọc được Level.
+                    -- Coi "không đọc được" là đủ khiến mỗi trận xong lại về Lobby xin Prestige,
+                    -- bị Lobby từ chối (Level < 100) rồi lặp mãi. Vì vậy luôn giãn cách:
+                    -- tối đa 1 lần về Lobby kiểm tra Prestige mỗi 10 phút.
                     local currentLvl = readPlayerLevel(player)
                     local targetLevel = 100
-                    local hasLevel = (currentLvl == nil or currentLvl >= targetLevel)
+                    local levelKnown = type(currentLvl) == "number"
+                    local hasLevel = levelKnown and currentLvl >= targetLevel
                     local hasGold = (prestigeGold ~= nil and type(gold) == "number" and gold >= prestigeGold)
+                    local nextCheck = prestigeCheckAt(player)
+                    local canCheck = (hasLevel or not levelKnown) and os.time() >= nextCheck
+                    -- Không có writefile thì mốc chờ mất sau teleport: chỉ về Lobby khi
+                    -- đã đọc chắc chắn Level >= 100, tránh lặp về Lobby mỗi trận.
+                    if type(writefile) ~= "function" then canCheck = hasLevel end
 
-                    if prestigeGold ~= nil and hasLevel and hasGold and not env.AutoPrestigeNotEligible then
-                        print(string.format("[AUTO PRESTIGE] ĐÃ ĐẠT LEVEL %s & ĐỦ VÀNG (%s >= %s) ĐỂ PRESTIGE! Quay về Lobby!",
-                            tostring(currentLvl or 100), tostring(gold), tostring(prestigeGold)))
+                    if prestigeGold ~= nil and canCheck and hasGold and not env.AutoPrestigeNotEligible then
+                        setPrestigeCheckAt(player, os.time() + 600)
+                        if levelKnown then
+                            print(string.format("[AUTO PRESTIGE] ĐÃ ĐẠT LEVEL %d & ĐỦ VÀNG (%s >= %s) ĐỂ PRESTIGE! Quay về Lobby!",
+                                currentLvl, tostring(gold), tostring(prestigeGold)))
+                        else
+                            print(string.format("[AUTO PRESTIGE] Đủ vàng Prestige (%s >= %s), Level chưa đọc được trong mission -> về Lobby kiểm tra (10 phút/lần).",
+                                tostring(gold), tostring(prestigeGold)))
+                        end
                         if stopMissionFarm then stopMissionFarm() end
                         local post = remote("POST")
                         if post then pcall(function() post:FireServer("Functions", "Teleport") end) end
@@ -2131,12 +2184,14 @@ local function startMissionFarm()
                         task.wait(5)
                         return
                     elseif prestigeGold ~= nil then
-                        if currentLvl and currentLvl < targetLevel then
+                        if levelKnown and currentLvl < targetLevel then
                             print(string.format("[AUTO PRESTIGE] Cày Prestige: Level hiện tại %d / %d. Chưa đủ Level -> Tiếp tục Retry!",
                                 currentLvl, targetLevel))
                         elseif not hasGold then
                             print(string.format("[AUTO PRESTIGE] Cày Prestige: Vàng hiện tại %s / %s. Chưa đủ Vàng -> Tiếp tục Retry!",
                                 tostring(gold or 0), tostring(prestigeGold)))
+                        elseif not canCheck then
+                            print("[AUTO PRESTIGE] Đủ vàng Prestige nhưng chưa tới lượt kiểm tra Level ở Lobby -> Tiếp tục Retry!")
                         end
                     end
 
@@ -2781,7 +2836,7 @@ local function runPrestigeFlow()
         -- Prestige is checked before Upgrade All can spend the threshold balance.
         ensureGoldPotion(player)
     else
-        print("[AUTO PRESTIGE] Lobby: Prestige -> Upgrades (Gold Potion tắt, không mua boost).")
+        print("[AUTO PRESTIGE] Lobby: Prestige -> Upgrades.")
         -- Clear proof-of-use left over from an earlier run so nothing can ever read it
         -- as "the potion just expired" after the boost was disabled.
         local lobbyEnv = type(getgenv) == "function" and getgenv() or _G
