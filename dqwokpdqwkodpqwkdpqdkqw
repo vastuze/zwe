@@ -87,6 +87,10 @@ while not Players.LocalPlayer do task.wait(0.25) end
 Players.LocalPlayer:WaitForChild("PlayerGui")
 local TIMEOUT = 30
 local stopMissionFarm
+-- Forward declaration: readPlayerLevel() dùng findPath() nhưng hàm này được định nghĩa
+-- ở dưới; thiếu dòng này thì findPath bên trong readPlayerLevel là nil -> script chết
+-- giữa flow Lobby (không bao giờ tới bước tạo mission).
+local findPath
 
 -- Core.Update.Get_Data có thể trả (ok, data) hoặc chỉ (data): chọn bảng đúng theo shape,
 -- không phụ thuộc select(2, ...) như trước (dễ ra nil -> tụt Grade E -> chọn Easy).
@@ -583,7 +587,7 @@ local function selectLobby()
     return false
 end
 
-local function findPath(root, names)
+function findPath(root, names)
     local node = root
     for _, name in ipairs(names) do node = node and node:FindFirstChild(name) end
     return node
@@ -639,22 +643,13 @@ local function readGameGrade(targetPlayer)
     end
 end
 
--- Check Prestige: Core.Update (Progression.Prestige) -> UI Equipment.Prestige.Progress.Title
--- -> getgc (quét RAM, chỉ khi executor hỗ trợ). Trả rank, level, nguồn.
+-- Check Prestige, ưu tiên nguồn đáng tin nhất trước:
+--   1. UI Equipment.Prestige.Progress.Title (chính chủ, đúng như ảnh SERGEANT)
+--   2. Core.Update -> Progression.Prestige
+--   3. getgc (quét RAM) chỉ dùng khi 2 nguồn trên không đọc được, vì nó có thể gặp
+--      bảng của slot/người khác và trả 0 -> chính là nguyên nhân webhook ghi Prestige 0.
 local function readGamePrestige(targetPlayer)
     local p = targetPlayer or Players.LocalPlayer
-    local liveData = readLiveData(p)
-    if liveData then
-        local prog = liveData.Progression
-            or (liveData.Slots and liveData.Current_Slot and liveData.Slots[liveData.Current_Slot]
-                and liveData.Slots[liveData.Current_Slot].Progression)
-        if prog and type(prog.Prestige) == "number" then
-            return prog.Prestige, prog.Level, "Core.Update"
-        end
-        if type(liveData.Prestige) == "number" then
-            return liveData.Prestige, nil, "Core.Update"
-        end
-    end
 
     local gui = p and p:FindFirstChild("PlayerGui")
     local interface = gui and gui:FindFirstChild("Interface")
@@ -674,20 +669,33 @@ local function readGamePrestige(targetPlayer)
         end
     end
 
+    local liveData = readLiveData(p)
+    if liveData then
+        local prog = liveData.Progression
+            or (liveData.Slots and liveData.Current_Slot and liveData.Slots[liveData.Current_Slot]
+                and liveData.Slots[liveData.Current_Slot].Progression)
+        if prog and type(prog.Prestige) == "number" and prog.Prestige > 0 then
+            return prog.Prestige, prog.Level, "Core.Update"
+        end
+        if type(liveData.Prestige) == "number" and liveData.Prestige > 0 then
+            return liveData.Prestige, nil, "Core.Update"
+        end
+    end
+
     if type(getgc) == "function" then
-        local found
+        local gcRank, gcLevel
         pcall(function()
             for _, obj in pairs(getgc(true)) do
                 if type(obj) == "table" then
                     local prog = rawget(obj, "Progression")
-                    if type(prog) == "table" and type(prog.Prestige) == "number" then
-                        found = {Prestige = prog.Prestige, Level = prog.Level}
-                        break
+                    if type(prog) == "table" and type(prog.Prestige) == "number"
+                        and prog.Prestige > 0 and (gcRank == nil or prog.Prestige > gcRank) then
+                        gcRank, gcLevel = prog.Prestige, prog.Level
                     end
                 end
             end
         end)
-        if found then return found.Prestige, found.Level, "getgc" end
+        if gcRank then return gcRank, gcLevel, "getgc" end
     end
 end
 
@@ -1138,9 +1146,14 @@ local function tryPrestige(player)
 
     local readValue = readRank()
     local rank = readValue or 0
-    -- Chỉ ghi file khi thật sự đọc được rank. Đọc lỗi mà ghi 0 sẽ làm hỏng mốc Prestige
-    -- (webhook hiện "Prestige: 0" và mission tính mốc P1 sai).
-    if readValue ~= nil then saveRank(rank) end
+    -- Chỉ ghi khi thật sự đọc được rank, và không bao giờ ghi thấp hơn rank đã lưu.
+    if readValue ~= nil then
+        local savedRank = env.AutoPrestigeRank and env.AutoPrestigeRank.rank
+        if type(savedRank) ~= "number" or readValue >= savedRank then saveRank(readValue) end
+        rank = readValue
+    elseif env.AutoPrestigeRank and type(env.AutoPrestigeRank.rank) == "number" then
+        rank = env.AutoPrestigeRank.rank
+    end
     if not ranks[rank + 1] then
         print("[AUTO PRESTIGE] Highest rank reached (no rank " .. tostring(rank + 1) .. ").")
         return
@@ -1939,8 +1952,10 @@ watcher.setGrade = function(tag)
 end
 watcher.rank = function() return goldLedger.rank end
 watcher.setRank = function(rank)
-    if type(rank) ~= "number" or rank < 0 or rank ~= rank or rank % 1 ~= 0
-        or rank == goldLedger.rank then return end
+    if type(rank) ~= "number" or rank < 0 or rank ~= rank or rank % 1 ~= 0 then return end
+    -- Prestige chỉ tăng, không bao giờ giảm. Một lần đọc lỗi ra 0 không được phép
+    -- xoá rank thật (SERGEANT = 3) đã lưu.
+    if type(goldLedger.rank) == "number" and rank <= goldLedger.rank then return end
     goldLedger.rank = rank
     saveGold()
     print("[WEBHOOK] Da cap nhat Prestige: " .. tostring(rank))
