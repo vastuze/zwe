@@ -87,6 +87,7 @@ while not Players.LocalPlayer do task.wait(0.25) end
 Players.LocalPlayer:WaitForChild("PlayerGui")
 local TIMEOUT = 30
 local stopMissionFarm
+local captureLobbyGrade
 -- Forward declaration: readPlayerLevel() dùng findPath() nhưng hàm này được định nghĩa
 -- ở dưới; thiếu dòng này thì findPath bên trong readPlayerLevel là nil -> script chết
 -- giữa flow Lobby (không bao giờ tới bước tạo mission).
@@ -948,7 +949,7 @@ local function sendLobbyResult(result, fields)
     end
 end
 
-local function readDifficulty(player)
+local function readDifficulty(player, initialGrade, initialPotential)
     local values = require(ReplicatedStorage.Modules.Storage.Values)
     local env = type(getgenv) == "function" and getgenv() or _G
 
@@ -960,8 +961,25 @@ local function readDifficulty(player)
     local equipment = interface and findPath(interface, {"Equipment"})
 
     -- 1. Nâng cấp trang bị 100% bằng Remote, sau đó đọc Grade live (không plan, không file)
-    local _, lastData, remotePotential, upgradeRounds = pcall(upgradeAll, player, interface, equipment, values)
+    local upgradeOK, lastData, remotePotential, upgradeRounds = pcall(upgradeAll, player, interface, equipment, values)
+    if not upgradeOK then
+        warn("[AUTO PRESTIGE] Upgrade step failed: " .. tostring(lastData))
+        lastData, remotePotential, upgradeRounds = nil, nil, 0
+    end
+    local titleGrade, titlePotential
+    if (upgradeRounds or 0) > 0 then
+        titleGrade, titlePotential = captureLobbyGrade(player)
+    else
+        titleGrade, titlePotential = initialGrade, initialPotential
+    end
     local livePotential = readLivePotential(player)
+    if type(titlePotential) == "number" then
+        livePotential = titlePotential
+        -- A checked Equipment Title takes priority over uninitialized module data.
+        if type(remotePotential) == "number" and remotePotential > titlePotential then
+            livePotential = remotePotential
+        end
+    end
     if type(remotePotential) == "number" and (not livePotential or remotePotential > livePotential) then
         livePotential = remotePotential
     end
@@ -2818,6 +2836,85 @@ local function closePanel(player, panelName)
     warn("[POTION] " .. panelName .. " panel could not be closed.")
 end
 
+captureLobbyGrade = function(player)
+    local interface = awaitPath(player, {"PlayerGui", "Interface"})
+    local button = awaitPath(interface, {"Topbar", "Main", "Categories", "Equipment", "Interact"})
+    local equipment = awaitPath(interface, {"Equipment"})
+    local values = require(ReplicatedStorage.Modules.Storage.Values)
+
+    local function clickOnce(target)
+        assert(target:IsA("GuiButton"), "Equipment control is not a GuiButton.")
+        if type(firesignal) == "function" then
+            firesignal(target.MouseButton1Click)
+        else
+            local pos = target.AbsolutePosition + target.AbsoluteSize / 2
+            local input = game:GetService("VirtualInputManager")
+            input:SendMouseButtonEvent(pos.X, pos.Y, 0, true, game, 1)
+            task.wait(0.05)
+            input:SendMouseButtonEvent(pos.X, pos.Y, 0, false, game, 1)
+        end
+    end
+    local function readTitle()
+        local title = findPath(equipment, {"Categories", "Upgrades", "Main", "Title"})
+        if not title or title.Text == "" then return nil end
+        local text = title.Text:gsub("<[^>]*>", ""):upper()
+        local tag = text:match("%[([A-S][%+%-]?)%s*GRADE%]")
+            or text:match("%[([A-S][%+%-]?)%]")
+        for index, known in pairs(values.Pot_Tags or {}) do
+            if tag == known and type(index) == "number" then return tag, index end
+        end
+    end
+
+    local ok, tag, potential = pcall(function()
+        if not isVisible(equipment) then
+            print("[AUTO PRESTIGE] Opening Equipment.Interact to read Grade...")
+            clickOnce(button)
+            task.wait(0.8)
+        end
+        if not waitForValue(function() return isVisible(equipment) end) then return nil end
+        local found, index = readTitle()
+        if not found then
+            local upgrades = findPath(equipment, {"Categories", "Upgrades", "Main", "Interact"})
+            if upgrades then
+                clickOnce(upgrades)
+                task.wait(0.5)
+            end
+            local deadline = os.clock() + 5
+            repeat
+                found, index = readTitle()
+                if found then break end
+                task.wait(0.1)
+            until os.clock() >= deadline
+        end
+        return found, index
+    end)
+
+    if isVisible(equipment) then
+        task.wait(0.2)
+        local closed = pcall(clickOnce, button)
+        if closed then task.wait(0.2) end
+        if isVisible(equipment) then closePanel(player, "Equipment") end
+    end
+    if not ok then
+        warn("[AUTO PRESTIGE] Equipment Grade check failed: " .. tostring(tag))
+        return nil
+    end
+    if not tag then
+        warn("[AUTO PRESTIGE] Equipment opened but Grade Title is unreadable; not saving a default Grade.")
+        return nil
+    end
+    local watcher = configEnv.AutoPrestigeRewardsWatcher
+    if watcher and watcher.setGrade then watcher.setGrade(tag) end
+    print(string.format("[AUTO PRESTIGE] Equipment Title Grade: [%s] (Pot %d)", tag, potential))
+    if potential >= 15 then
+        print("[AUTO PRESTIGE] MAX Grade (S-): no Lobby return for Grade upgrades.")
+    else
+        local cost, nextTag = nextGradeTarget(values, potential)
+        print(string.format("[AUTO PRESTIGE] Next Grade: %s | Gold needed: %s", tostring(nextTag), tostring(cost)))
+    end
+    return tag, potential
+end
+
 -- An account without enough Gems cannot buy a Gold Boost in Lobby. Farming is the
 -- way to earn them, so the potion step must never block the mission start.
 local function potionUnavailable(reason)
@@ -3000,7 +3097,7 @@ local function waitLobbyAutoexec(player)
             stableSince = nil
         end
         previousUI = ui
-        if stableSince and os.clock() - stableSince >= 3 and os.clock() - started >= 5 then
+        if stableSince and os.clock() - stableSince >= 3 and os.clock() - started >= 15 then
             print("[AUTO PRESTIGE] Lobby UI loaded; starting menu setup.")
             return
         end
@@ -3034,6 +3131,7 @@ local function runPrestigeFlow()
 
     -- Background balance capture must run in Lobby too, to carry Gold/Gems into map.
     startRewardsWebhook()
+    local initialGrade, initialPotential = captureLobbyGrade(player)
     if configEnv.UseGoldBoost then
         print("[AUTO PRESTIGE] Lobby: Gold Potion -> Prestige -> Upgrades.")
         -- Prestige is checked before Upgrade All can spend the threshold balance.
@@ -3062,9 +3160,14 @@ local function runPrestigeFlow()
                 .. "continuing on the Lobby purchase confirmation.")
         end
     end
+    local previousRank = configEnv.AutoPrestigeRank and configEnv.AutoPrestigeRank.rank
     tryPrestige(player)
+    local currentRank = configEnv.AutoPrestigeRank and configEnv.AutoPrestigeRank.rank
+    if currentRank ~= previousRank then
+        initialGrade, initialPotential = captureLobbyGrade(player)
+    end
     pcall(autoCleanPerks, player)
-    local difficulty = readDifficulty(player)
+    local difficulty = readDifficulty(player, initialGrade, initialPotential)
     print("[AUTO PRESTIGE] Mission: Shiganshina/Breach -> configured modifiers -> Start.")
     startMission(player, difficulty)
 end
