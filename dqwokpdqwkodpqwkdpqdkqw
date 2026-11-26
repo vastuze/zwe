@@ -1099,6 +1099,16 @@ local function readDifficulty(player)
         end
     end
 
+    -- 6b. Lưu Prestige vào ledger y như Grade, để place mission (không đọc live được)
+    -- vẫn hiện đúng trên webhook.
+    if watcher and watcher.setRank then
+        local liveRank = readGamePrestige(player)
+        if type(liveRank) == "number" then
+            print("[AUTO PRESTIGE] Prestige live (Lobby): " .. tostring(liveRank))
+            pcall(watcher.setRank, liveRank)
+        end
+    end
+
     -- 7. Cập nhật số dư vàng vào ledger
     if watcher and watcher.refreshBalance then watcher.refreshBalance() end
 
@@ -2615,17 +2625,21 @@ local function startMissionFarm()
                     root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
                     root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
                 end
-                print("[AUTO PRESTIGE] Blades empty: Teleport refill -> Bắn Remote -> về lại chỗ ngay!")
+                print("[AUTO PRESTIGE] Blades empty: Teleport refill -> Bắn Remote -> đợi 0.2s -> về chỗ cũ!")
                 pcall(function()
                     clearRefillHold()
                     root.Anchored = false
                     root.CFrame = station.CFrame + Vector3.new(0, 3, 0)
                     root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
                     root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+                    -- Neo tại trạm trong lúc chờ để không bị rơi khỏi vị trí refill.
+                    root.Anchored = true
 
                     post:FireServer("Attacks", "Reload", station)
                 end)
-                -- Gửi remote xong teleport về ngay; bấm R ở vị trí cũ để server nạp lưỡi.
+                -- Đứng tại trạm 0.2s cho server nhận vị trí rồi teleport về chỗ cũ.
+                local waitUntil = os.clock() + 0.2
+                while os.clock() < waitUntil do task.wait(0.02) end
                 restore()
                 pcall(function() key(Enum.KeyCode.R) end)
                 emptySince, emptyCharacter = nil, nil
