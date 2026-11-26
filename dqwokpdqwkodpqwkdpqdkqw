@@ -2640,11 +2640,11 @@ local function startMissionFarm()
             release(); task.wait(0.1); return
         end
         if setsLeft == 0 and segmentsLeft == 0 then
-            -- Sau một lần refill, chờ tối đa 2.5s để game replicate lưỡi/segments mới;
-            -- nếu đã có kiếm/segments thì thôi, còn vẫn 0/0 thì cho teleport refill lại.
+            -- Sau một lần refill, chờ 5 giây ở trên không rồi mới check lại;
+            -- nếu đã có kiếm/segments (3/3) thì thôi, còn vẫn 0/0 thì chạy lại bước 1.
             if refillPending and refillCharacter == character then
-                if os.clock() - lastRefillAt < 2.5 then
-                    reportFarmWait("waiting for Reload replication")
+                if os.clock() - lastRefillAt < 5 then
+                    reportFarmWait("waiting 5s for Reload replication")
                     task.wait(0.1)
                     return
                 end
@@ -2677,7 +2677,7 @@ local function startMissionFarm()
                     hold.Parent = root
                     farm.refillHold = hold
                 end
-                print("[AUTO PRESTIGE] Blades empty -> teleport station -> wait 0.5s -> Reload -> wait 0.5s -> return high.")
+                print("[AUTO PRESTIGE] Blades empty -> teleport station -> wait 0.5s -> Reload -> return high (5s check).")
                 local refillOK, refillError = pcall(function()
                     stopHeightGuard()
                     clearRefillHold()
@@ -2692,16 +2692,16 @@ local function startMissionFarm()
                     else
                         refillWarning("Character/farm became invalid during 0.5s wait; Reload remote skipped.")
                     end
-                    task.wait(0.5)
                 end)
                 restore()
+                lastRefillAt = os.clock()
                 local newSets, newSegments = bladeStatus(character)
                 if newSets and (newSets > 0 or (newSegments and newSegments > 0)) then
                     refillPending = false
                     refillCharacter = nil
                 end
                 if not refillOK then
-                    refillWarning("Reload attempt failed; will retry if still empty: " .. tostring(refillError))
+                    refillWarning("Reload attempt failed; will retry after 5s if still 0/0: " .. tostring(refillError))
                 end
             else
                 refillPending = false
