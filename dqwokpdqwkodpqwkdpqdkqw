@@ -643,6 +643,37 @@ local function readGameGrade(targetPlayer)
     end
 end
 
+-- Prestige = số thứ tự bậc theo TÊN hiển thị, không dùng index của Modules.Storage.Ranks
+-- (index đó lệch 1 bậc nên SERGEANT từng bị đọc thành 0).
+local PRESTIGE_BY_TAG = {
+    ENLIST = 0, CADET = 1, CORPORAL = 2, SERGEANT = 3, LIEUTENANT = 4, COMMANDER = 5,
+}
+local PRESTIGE_TAG_BY_RANK = {}
+for tag, rank in pairs(PRESTIGE_BY_TAG) do PRESTIGE_TAG_BY_RANK[rank] = tag end
+
+local function prestigeRankFromTag(raw)
+    if type(raw) ~= "string" then return nil end
+    local text = raw:gsub("<[^>]*>", ""):upper():match("^%s*(.-)%s*$")
+    if text == "" then return nil end
+    if PRESTIGE_BY_TAG[text] then return PRESTIGE_BY_TAG[text] end
+    -- Tên bậc lạ: chỉ map qua module khi Tag khớp, index của module trừ 1 (1-based -> 0-based).
+    local ranks
+    pcall(function() ranks = require(ReplicatedStorage.Modules.Storage.Ranks) end)
+    if type(ranks) ~= "table" then return nil end
+    for index, rank in pairs(ranks) do
+        if type(rank) == "table" and type(rank.Tag) == "string" then
+            local tag = rank.Tag:gsub("<[^>]*>", ""):upper():match("^%s*(.-)%s*$")
+            if tag == text then
+                local mapped = PRESTIGE_BY_TAG[tag]
+                if mapped then return mapped end
+                if type(index) == "number" and index % 1 == 0 then
+                    return math.max(0, index - 1)
+                end
+            end
+        end
+    end
+end
+
 -- Check Prestige, ưu tiên nguồn đáng tin nhất trước:
 --   1. UI Equipment.Prestige.Progress.Title (chính chủ, đúng như ảnh SERGEANT)
 --   2. Core.Update -> Progression.Prestige
@@ -656,17 +687,8 @@ local function readGamePrestige(targetPlayer)
     local equipment = interface and interface:FindFirstChild("Equipment")
     local title = equipment and findPath(equipment, {"Prestige", "Progress", "Title"})
     if title and title.Text ~= "" then
-        local text = title.Text:gsub("<[^>]*>", ""):upper():match("^%s*(.-)%s*$")
-        if text == "ENLIST" then return 0, nil, "UI Title" end
-        local ranks
-        pcall(function() ranks = require(ReplicatedStorage.Modules.Storage.Ranks) end)
-        if type(ranks) == "table" then
-            for index, rank in pairs(ranks) do
-                if type(rank) == "table" and rank.Tag and text == tostring(rank.Tag):upper() then
-                    return index, nil, "UI Title"
-                end
-            end
-        end
+        local rank = prestigeRankFromTag(title.Text)
+        if type(rank) == "number" then return rank, nil, "UI Title" end
     end
 
     local liveData = readLiveData(p)
@@ -1154,8 +1176,8 @@ local function tryPrestige(player)
     elseif env.AutoPrestigeRank and type(env.AutoPrestigeRank.rank) == "number" then
         rank = env.AutoPrestigeRank.rank
     end
-    if not ranks[rank + 1] then
-        print("[AUTO PRESTIGE] Highest rank reached (no rank " .. tostring(rank + 1) .. ").")
+    if rank >= 5 then
+        print("[AUTO PRESTIGE] Highest rank reached (COMMANDER / Prestige 5).")
         return
     end
 
@@ -1177,7 +1199,8 @@ local function tryPrestige(player)
         print("[AUTO PRESTIGE] P1-P5 configuration complete; skipping further Prestige.")
         return
     end
-    local rankTag = ranks[rank] and ranks[rank].Tag or (rank == 0 and "ENLIST" or "?")
+    local rankTag = PRESTIGE_TAG_BY_RANK[rank]
+        or (type(ranks[rank]) == "table" and ranks[rank].Tag) or (rank == 0 and "ENLIST" or "?")
     print(string.format("[AUTO PRESTIGE] Prestige rank = %d (%s) | Gold %s | Target P%d = %s",
         rank, tostring(rankTag), tostring(gold), rank + 1, tostring(target)))
     local currentLvl = readPlayerLevel(player)
@@ -1805,16 +1828,8 @@ local function prestigeText()
         end
     end
     if rank == nil then return "Chua xac nhan Prestige tai Lobby" end
-    local tag
-    pcall(function()
-        local module = ReplicatedStorage:FindFirstChild("Modules")
-            and ReplicatedStorage.Modules:FindFirstChild("Storage")
-            and ReplicatedStorage.Modules.Storage:FindFirstChild("Ranks")
-        if module then
-            local ranks = require(module)
-            if type(ranks) == "table" and type(ranks[rank]) == "table" then tag = ranks[rank].Tag end
-        end
-    end)
+    -- Tên bậc lấy từ bảng chuẩn theo rank, không dùng index module (index bị lệch 1 bậc).
+    local tag = PRESTIGE_TAG_BY_RANK[rank]
     return tag and (tostring(rank) .. " (" .. tag .. ")") or tostring(rank)
 end
 
@@ -2590,7 +2605,9 @@ local function startMissionFarm()
                 local oldCF = root.CFrame
                 local restored = false
                 local function restore()
-                    if restored or not valid() then return end
+                    -- Về lại chỗ ngay sau khi gửi remote: chỉ cần root còn tồn tại,
+                    -- không phụ thuộc canFarm() (cutscene/skip UI không được giữ nhân vật ở trạm).
+                    if restored or not root.Parent or player.Character ~= character then return end
                     restored = true
                     root.CFrame = CFrame.new(oldCF.Position.X, math.max(configEnv.Height, oldCF.Position.Y), oldCF.Position.Z)
                         * oldCF.Rotation
@@ -2598,7 +2615,7 @@ local function startMissionFarm()
                     root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
                     root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
                 end
-                print("[AUTO PRESTIGE] Blades empty: Teleport refill -> Bắn Remote -> đợi 0.5s -> về vị trí cũ!")
+                print("[AUTO PRESTIGE] Blades empty: Teleport refill -> Bắn Remote -> về lại chỗ ngay!")
                 pcall(function()
                     clearRefillHold()
                     root.Anchored = false
@@ -2607,12 +2624,10 @@ local function startMissionFarm()
                     root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
 
                     post:FireServer("Attacks", "Reload", station)
-                    key(Enum.KeyCode.R)
                 end)
-                -- Đứng tại trạm refill 0.5s cho server kịp nạp lưỡi rồi mới teleport về.
-                local waitUntil = os.clock() + 0.5
-                while valid() and os.clock() < waitUntil do task.wait(0.05) end
+                -- Gửi remote xong teleport về ngay; bấm R ở vị trí cũ để server nạp lưỡi.
                 restore()
+                pcall(function() key(Enum.KeyCode.R) end)
                 emptySince, emptyCharacter = nil, nil
             else
                 refillWarning(not station and "HQ refill part not found."
