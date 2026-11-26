@@ -2198,8 +2198,9 @@ local function startMissionFarm()
         if farm.refillHold then farm.refillHold:Destroy(); farm.refillHold = nil end
     end
     local function holdBeforeRefill(root)
+        stopHeightGuard()
         clearRefillHold()
-        root.Anchored = true
+        root.Anchored = false
         root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
     end
     local function release()
@@ -2633,33 +2634,26 @@ local function startMissionFarm()
                 local oldCF = root.CFrame
                 local restored = false
                 local function restore()
-                    -- Về lại chỗ ngay sau khi gửi remote: chỉ cần root còn tồn tại,
-                    -- không phụ thuộc canFarm() (cutscene/skip UI không được giữ nhân vật ở trạm).
                     if restored or not root.Parent or player.Character ~= character then return end
                     restored = true
-                    root.CFrame = CFrame.new(oldCF.Position.X, math.max(configEnv.Height, oldCF.Position.Y), oldCF.Position.Z)
-                        * oldCF.Rotation
-                    root.Anchored = true
+                    root.CFrame = oldCF
+                    root.Anchored = false
                     root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
                     root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
                 end
-                print("[AUTO PRESTIGE] Blades empty: Teleport refill -> Bắn Remote -> đợi 0.2s -> về chỗ cũ!")
-                pcall(function()
+                print("[AUTO PRESTIGE] Blades empty: Teleport refill -> Reload remote -> wait 0.5s -> return (unanchored).")
+                local refillOK, refillError = pcall(function()
+                    stopHeightGuard()
                     clearRefillHold()
                     root.Anchored = false
                     root.CFrame = station.CFrame + Vector3.new(0, 3, 0)
                     root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
                     root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-                    -- Neo tại trạm trong lúc chờ để không bị rơi khỏi vị trí refill.
-                    root.Anchored = true
-
                     post:FireServer("Attacks", "Reload", station)
+                    task.wait(0.5)
                 end)
-                -- Đứng tại trạm 0.2s cho server nhận vị trí rồi teleport về chỗ cũ.
-                local waitUntil = os.clock() + 0.2
-                while os.clock() < waitUntil do task.wait(0.02) end
                 restore()
-                pcall(function() key(Enum.KeyCode.R) end)
+                if not refillOK then refillWarning("Reload failed: " .. tostring(refillError)) end
                 emptySince, emptyCharacter = nil, nil
             else
                 refillWarning(not station and "HQ refill part not found."
