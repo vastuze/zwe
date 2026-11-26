@@ -595,6 +595,102 @@ local function awaitPath(root, names)
     return node
 end
 
+-- Check Grade bằng đúng logic đã test: Shared.Get_Potential -> Equipment Module ->
+-- đọc thẳng object UI (Title "UPGRADES [S- GRADE]" / Stat panel "[S-]"), không cần mở panel.
+-- Chỉ đáng tin ở Lobby; place mission game không replicate nên trả nil.
+local function readGameGrade(targetPlayer)
+    local p = targetPlayer or Players.LocalPlayer
+    local values
+    pcall(function() values = require(ReplicatedStorage.Modules.Storage.Values) end)
+
+    local potential
+    pcall(function()
+        local shared = require(ReplicatedStorage.Modules.Shared.Shared)
+        if type(shared) == "table" and type(shared.Get_Potential) == "function" then
+            local pot = shared.Get_Potential(nil, p)
+            if type(pot) == "number" then potential = pot end
+        end
+    end)
+    if type(potential) ~= "number" then
+        pcall(function()
+            local eq = require(ReplicatedStorage.Modules["User Interface"].Equipment)
+            if type(eq) == "table" and type(eq.Potential) == "number" then potential = eq.Potential end
+        end)
+    end
+    if type(potential) == "number" and values and values.Pot_Tags and values.Pot_Tags[potential] then
+        return values.Pot_Tags[potential], "Shared/Equipment Module (Pot " .. tostring(potential) .. ")"
+    end
+
+    local gui = p and p:FindFirstChild("PlayerGui")
+    local interface = gui and gui:FindFirstChild("Interface")
+    local equipment = interface and interface:FindFirstChild("Equipment")
+    if equipment then
+        local title = findPath(equipment, {"Categories", "Upgrades", "Main", "Title"})
+        if title and title.Text ~= "" then
+            local text = title.Text:gsub("<[^>]*>", "")
+            local tag = text:match("%[([A-S][%+%-]?)%s*GRADE%]") or text:match("%[([^%]]+)%]")
+            if tag and tag ~= "" then return tag, "UI Title" end
+        end
+        local current = findPath(equipment, {"Stat", "Inner", "Upgrade_Values", "Current"})
+        if current and current.Text ~= "" then
+            local tag = current.Text:gsub("<[^>]*>", ""):match("%[([A-S][%+%-]?)%]")
+            if tag then return tag, "UI Stat Panel" end
+        end
+    end
+end
+
+-- Check Prestige: Core.Update (Progression.Prestige) -> UI Equipment.Prestige.Progress.Title
+-- -> getgc (quét RAM, chỉ khi executor hỗ trợ). Trả rank, level, nguồn.
+local function readGamePrestige(targetPlayer)
+    local p = targetPlayer or Players.LocalPlayer
+    local liveData = readLiveData(p)
+    if liveData then
+        local prog = liveData.Progression
+            or (liveData.Slots and liveData.Current_Slot and liveData.Slots[liveData.Current_Slot]
+                and liveData.Slots[liveData.Current_Slot].Progression)
+        if prog and type(prog.Prestige) == "number" then
+            return prog.Prestige, prog.Level, "Core.Update"
+        end
+        if type(liveData.Prestige) == "number" then
+            return liveData.Prestige, nil, "Core.Update"
+        end
+    end
+
+    local gui = p and p:FindFirstChild("PlayerGui")
+    local interface = gui and gui:FindFirstChild("Interface")
+    local equipment = interface and interface:FindFirstChild("Equipment")
+    local title = equipment and findPath(equipment, {"Prestige", "Progress", "Title"})
+    if title and title.Text ~= "" then
+        local text = title.Text:gsub("<[^>]*>", ""):upper():match("^%s*(.-)%s*$")
+        if text == "ENLIST" then return 0, nil, "UI Title" end
+        local ranks
+        pcall(function() ranks = require(ReplicatedStorage.Modules.Storage.Ranks) end)
+        if type(ranks) == "table" then
+            for index, rank in pairs(ranks) do
+                if type(rank) == "table" and rank.Tag and text == tostring(rank.Tag):upper() then
+                    return index, nil, "UI Title"
+                end
+            end
+        end
+    end
+
+    if type(getgc) == "function" then
+        local found
+        pcall(function()
+            for _, obj in pairs(getgc(true)) do
+                if type(obj) == "table" then
+                    local prog = rawget(obj, "Progression")
+                    if type(prog) == "table" and type(prog.Prestige) == "number" then
+                        found = {Prestige = prog.Prestige, Level = prog.Level}
+                        break
+                    end
+                end
+            end
+        end)
+        if found then return found.Prestige, found.Level, "getgc" end
+    end
+end
+
 local function click(button, preferredEvent, stillNeeded)
     assert(button:IsA("GuiButton"), "Not a UI button: " .. button:GetFullName())
 
@@ -927,7 +1023,22 @@ local function readDifficulty(player)
         end)
     end
 
-    -- 4. Không đọc được Grade ở đâu: KHÔNG tự gán Grade E (dễ chọn nhầm Easy).
+    -- 4. Dự phòng cuối: đọc bằng readGameGrade (Shared/Equipment module/UI) rồi map lại index.
+    local gameVerified = false
+    if not gradeIndex then
+        local tag = readGameGrade(player)
+        if tag and values and values.Pot_Tags then
+            for index, potTag in pairs(values.Pot_Tags) do
+                if potTag == tag then
+                    gradeIndex, grade, gameVerified = index, tag, true
+                    print("[AUTO PRESTIGE] Grade (readGameGrade): [" .. tag .. "] Pot " .. tostring(index))
+                    break
+                end
+            end
+        end
+    end
+
+    -- 5. Không đọc được Grade ở đâu: KHÔNG tự gán Grade E (dễ chọn nhầm Easy).
     if not gradeIndex or not grade then
         warn("[AUTO PRESTIGE] Không đọc được Grade (live/UI/ledger); giữ độ khó tối đa "
             .. tostring(configEnv.MaxDifficulty or "Aberrant") .. " thay vì tụt về Easy.")
@@ -953,7 +1064,9 @@ local function readDifficulty(player)
     local watcher = env.AutoPrestigeRewardsWatcher
     if watcher and watcher.setGrade and type(gradeIndex) == "number" and grade then
         local stored = watcher.grade and watcher.grade()
-        if liveVerified or (upgradeRounds or 0) > 0 or not stored then watcher.setGrade(grade) end
+        if liveVerified or gameVerified or (upgradeRounds or 0) > 0 or not stored then
+            watcher.setGrade(grade)
+        end
     end
 
     -- 7. Cập nhật số dư vàng vào ledger
@@ -1002,28 +1115,9 @@ local function tryPrestige(player)
     local ranks = require(ReplicatedStorage.Modules.Storage.Ranks)
 
     local function readRank()
-        local label = equipment and findPath(equipment, {"Prestige", "Progress", "Title"})
-        if label and label.Text ~= "" then
-            local text = label.Text:gsub("<[^>]*>", ""):upper():match("^%s*(.-)%s*$")
-            if text == "ENLIST" then return 0 end
-            for index, rank in pairs(ranks) do
-                if text == rank.Tag:upper() then return index end
-            end
-        end
-        -- Thử đọc Rank / Prestige từ Module Core.Update (shape-tolerant)
-        local rankFromData = nil
-        pcall(function()
-            local liveData = readLiveData(player)
-            if liveData then
-                local pRank = liveData.Rank or liveData.Prestige
-                    or (liveData.Progression and liveData.Progression.Prestige)
-                    or (liveData.Slots and liveData.Current_Slot and liveData.Slots[liveData.Current_Slot] and (liveData.Slots[liveData.Current_Slot].Rank or liveData.Slots[liveData.Current_Slot].Prestige))
-                if type(pRank) == "number" then
-                    rankFromData = pRank
-                end
-            end
-        end)
-        if rankFromData then return rankFromData end
+        -- Core.Update -> UI Prestige.Progress.Title -> getgc (dùng chung với webhook).
+        local liveRank = readGamePrestige(player)
+        if type(liveRank) == "number" then return liveRank end
         local saved = env.AutoPrestigeRank
         if saved and type(saved.rank) == "number" then return saved.rank end
         return nil
@@ -1037,6 +1131,9 @@ local function tryPrestige(player)
                 writefile(prestigeFile(player), game:GetService("HttpService"):JSONEncode(data))
             end)
         end
+        -- Lưu luôn vào ledger để place mission đọc được (mission không check live được).
+        local watcher = configEnv.AutoPrestigeRewardsWatcher
+        if watcher and watcher.setRank then pcall(watcher.setRank, rank) end
     end
 
     local readValue = readRank()
@@ -1351,7 +1448,7 @@ end
 
 -- Executor file storage survives place teleports; scoped to game/account.
 local goldFile = "rewards_gold_" .. tostring(game.GameId) .. "_" .. tostring(player.UserId) .. ".json"
-local goldLedger = {balance = nil, lastMatch = nil, gems = nil, gemsMatch = nil, grade = nil}
+local goldLedger = {balance = nil, lastMatch = nil, gems = nil, gemsMatch = nil, grade = nil, rank = nil}
 local storageWarned = false
 local function validBalance(value)
     return type(value) == "number" and value == value and value >= 0 and value < math.huge
@@ -1377,6 +1474,12 @@ local function loadGold()
         goldLedger.grade = saved.grade
         print("[WEBHOOK] Da doc Grade da luu: " .. saved.grade)
     end
+    if ok and type(saved) == "table" and saved.userId == player.UserId
+        and saved.gameId == game.GameId and type(saved.rank) == "number"
+        and saved.rank >= 0 and saved.rank < math.huge and saved.rank % 1 == 0 then
+        goldLedger.rank = saved.rank
+        print("[WEBHOOK] Da doc Prestige da luu: " .. tostring(saved.rank))
+    end
 end
 
 local function saveGold()
@@ -1386,7 +1489,7 @@ local function saveGold()
             writefile(goldFile, HttpService:JSONEncode({userId = player.UserId, gameId = game.GameId,
                 balance = goldLedger.balance, lastMatch = goldLedger.lastMatch,
                 gems = goldLedger.gems, gemsMatch = goldLedger.gemsMatch,
-                grade = goldLedger.grade}))
+                grade = goldLedger.grade, rank = goldLedger.rank}))
         end)
     end
     if not ok and not storageWarned then
@@ -1660,75 +1763,33 @@ local function boostsText()
     return #lines > 0 and table.concat(lines, "\n"):sub(1, 1000) or "Khong co du lieu boost"
 end
 
--- Check Prestige theo logic đã test riêng: Core.Update (Progression.Prestige)
--- -> UI Equipment.Prestige.Progress.Title -> getgc (quét RAM) -> ledger đã lưu.
-local function readGamePrestige()
-    local liveData = readLiveData(player)
-    if liveData then
-        local prog = liveData.Progression
-            or (liveData.Slots and liveData.Current_Slot and liveData.Slots[liveData.Current_Slot]
-                and liveData.Slots[liveData.Current_Slot].Progression)
-        if prog and type(prog.Prestige) == "number" then
-            return prog.Prestige, prog.Level, "Core.Update"
-        end
-        if type(liveData.Prestige) == "number" then
-            return liveData.Prestige, nil, "Core.Update"
-        end
-    end
-
-    local gui = player and player:FindFirstChild("PlayerGui")
-    local interface = gui and gui:FindFirstChild("Interface")
-    local equipment = interface and interface:FindFirstChild("Equipment")
-    local title = equipment and findPath(equipment, {"Prestige", "Progress", "Title"})
-    if title and title.Text ~= "" then
-        local text = title.Text:gsub("<[^>]*>", ""):upper():match("^%s*(.-)%s*$")
-        if text == "ENLIST" then return 0, nil, "UI Title" end
-        local ranks
-        pcall(function() ranks = require(ReplicatedStorage.Modules.Storage.Ranks) end)
-        if type(ranks) == "table" then
-            for index, rank in pairs(ranks) do
-                if type(rank) == "table" and rank.Tag and text == tostring(rank.Tag):upper() then
-                    return index, nil, "UI Title"
-                end
-            end
-        end
-    end
-
-    if type(getgc) == "function" then
-        local found
-        pcall(function()
-            for _, obj in pairs(getgc(true)) do
-                if type(obj) == "table" then
-                    local prog = rawget(obj, "Progression")
-                    if type(prog) == "table" and type(prog.Prestige) == "number" then
-                        found = {Prestige = prog.Prestige, Level = prog.Level}
-                        break
-                    end
-                end
-            end
-        end)
-        if found then return found.Prestige, found.Level, "getgc" end
-    end
-end
-
 local function prestigeText()
-    local liveRank, liveLevel, liveSource = readGamePrestige()
-    local saved = configEnv.AutoPrestigeRank
-    if type(saved) ~= "table" and type(readfile) == "function" then
-        local ok, value = pcall(function()
-            return HttpService:JSONDecode(readfile(prestigeFile(player)))
-        end)
-        if ok then saved = value end
-    end
+    local watcher = configEnv.AutoPrestigeRewardsWatcher
     local rank
-    if type(liveRank) == "number" then
-        rank = liveRank
-        print(string.format("[WEBHOOK] Prestige doc tu %s: %d%s", tostring(liveSource), liveRank,
-            liveLevel and (" (Level " .. tostring(liveLevel) .. ")") or ""))
-    elseif type(saved) == "table" and saved.userId == player.UserId and saved.gameId == game.GameId
-        and type(saved.rank) == "number" and saved.rank >= 0 and saved.rank < math.huge
-        and saved.rank % 1 == 0 then
-        rank = saved.rank
+    -- Trong mission game không expose Prestige -> dùng rank đã lưu từ Lobby (ledger).
+    if inMission() and watcher and watcher.rank then rank = watcher.rank() end
+    if rank == nil then
+        local liveRank, liveLevel, liveSource = readGamePrestige(player)
+        if type(liveRank) == "number" then
+            rank = liveRank
+            print(string.format("[WEBHOOK] Prestige doc tu %s: %d%s", tostring(liveSource), liveRank,
+                liveLevel and (" (Level " .. tostring(liveLevel) .. ")") or ""))
+            if watcher and watcher.setRank then pcall(watcher.setRank, rank) end
+        end
+    end
+    if rank == nil then
+        local saved = configEnv.AutoPrestigeRank
+        if type(saved) ~= "table" and type(readfile) == "function" then
+            local ok, value = pcall(function()
+                return HttpService:JSONDecode(readfile(prestigeFile(player)))
+            end)
+            if ok then saved = value end
+        end
+        if type(saved) == "table" and saved.userId == player.UserId and saved.gameId == game.GameId
+            and type(saved.rank) == "number" and saved.rank >= 0 and saved.rank < math.huge
+            and saved.rank % 1 == 0 then
+            rank = saved.rank
+        end
     end
     if rank == nil then return "Chua xac nhan Prestige tai Lobby" end
     local tag
@@ -1744,54 +1805,19 @@ local function prestigeText()
     return tag and (tostring(rank) .. " (" .. tag .. ")") or tostring(rank)
 end
 
--- Check Grade theo logic đã test riêng: Shared.Get_Potential -> Equipment Module ->
--- đọc thẳng object UI (Title "UPGRADES [S- GRADE]" / Stat panel "[S-]"), đọc được cả khi panel đóng.
-local function readGameGrade()
-    local values
-    pcall(function() values = require(ReplicatedStorage.Modules.Storage.Values) end)
-
-    local potential
-    pcall(function()
-        local shared = require(ReplicatedStorage.Modules.Shared.Shared)
-        if type(shared) == "table" and type(shared.Get_Potential) == "function" then
-            local pot = shared.Get_Potential(nil, player)
-            if type(pot) == "number" then potential = pot end
-        end
-    end)
-    if type(potential) ~= "number" then
-        pcall(function()
-            local eq = require(ReplicatedStorage.Modules["User Interface"].Equipment)
-            if type(eq) == "table" and type(eq.Potential) == "number" then potential = eq.Potential end
-        end)
-    end
-    if type(potential) == "number" and values and values.Pot_Tags and values.Pot_Tags[potential] then
-        return values.Pot_Tags[potential], "Shared/Equipment Module (Pot " .. tostring(potential) .. ")"
-    end
-
-    local gui = player and player:FindFirstChild("PlayerGui")
-    local interface = gui and gui:FindFirstChild("Interface")
-    local equipment = interface and interface:FindFirstChild("Equipment")
-    if equipment then
-        local title = findPath(equipment, {"Categories", "Upgrades", "Main", "Title"})
-        if title and title.Text ~= "" then
-            local text = title.Text:gsub("<[^>]*>", "")
-            local tag = text:match("%[([A-S][%+%-]?)%s*GRADE%]") or text:match("%[([^%]]+)%]")
-            if tag and tag ~= "" then return tag, "UI Title" end
-        end
-        local current = findPath(equipment, {"Stat", "Inner", "Upgrade_Values", "Current"})
-        if current and current.Text ~= "" then
-            local tag = current.Text:gsub("<[^>]*>", ""):match("%[([A-S][%+%-]?)%]")
-            if tag then return tag, "UI Stat Panel" end
-        end
-    end
-end
-
 local function getPlayerGradeText()
-    local tag, source = readGameGrade()
-    if tag then
-        print("[WEBHOOK] Grade doc tu " .. tostring(source) .. ": [" .. tostring(tag) .. "]")
-    end
     local watcher = configEnv.AutoPrestigeRewardsWatcher
+    local tag
+    -- Trong mission game không replicate Grade -> dùng Grade đã lưu từ Lobby (ledger).
+    if inMission() and watcher and watcher.grade then tag = watcher.grade() end
+    if not tag then
+        local liveTag, source = readGameGrade(player)
+        if liveTag then
+            tag = liveTag
+            print("[WEBHOOK] Grade doc tu " .. tostring(source) .. ": [" .. tostring(tag) .. "]")
+            if watcher and watcher.setGrade then pcall(watcher.setGrade, tag) end
+        end
+    end
     if not tag then
         local okPot, potential, values = pcall(readGradeIndex, player)
         if okPot and type(potential) == "number" and values and values.Pot_Tags
@@ -1800,8 +1826,6 @@ local function getPlayerGradeText()
         end
     end
     if not tag then tag = readGradeFromUI(player) end
-    -- Place mission không có Core.Update/UI: lấy Grade đã lưu trong ledger (cùng chỗ Gold/Gems).
-    if not tag and watcher and watcher.grade then tag = watcher.grade() end
     if not tag then
         local env = type(getgenv) == "function" and getgenv() or _G
         local timer = env.AutoPrestigeLobbyTimer
@@ -1838,6 +1862,12 @@ local function makeFields(interface, main, rows, goldSummary)
     fields[#fields + 1] = {name = "Grade", value = getPlayerGradeText(), inline = true}
     fields[#fields + 1] = {name = "Level", value = getPlayerLevelText(), inline = true}
     fields[#fields + 1] = {name = "Prestige: " .. prestigeText(), value = "\226\128\139", inline = true}
+    local goldBalance, gemBalance = nil, nil
+    if watcher.balance then goldBalance, gemBalance = watcher.balance() end
+    fields[#fields + 1] = {name = "Gold", inline = true,
+        value = type(goldBalance) == "number" and formatNumber(goldBalance) or "?"}
+    fields[#fields + 1] = {name = "Gems", inline = true,
+        value = type(gemBalance) == "number" and formatNumber(gemBalance) or "?"}
     fields[#fields + 1] = {name = "Các boost", value = boostsText(), inline = false}
     local parts, length = {}, 0
     for _, row in ipairs(rows) do
@@ -1906,6 +1936,14 @@ watcher.setGrade = function(tag)
     goldLedger.grade = tag
     saveGold()
     print("[WEBHOOK] Da cap nhat Grade: " .. tag)
+end
+watcher.rank = function() return goldLedger.rank end
+watcher.setRank = function(rank)
+    if type(rank) ~= "number" or rank < 0 or rank ~= rank or rank % 1 ~= 0
+        or rank == goldLedger.rank then return end
+    goldLedger.rank = rank
+    saveGold()
+    print("[WEBHOOK] Da cap nhat Prestige: " .. tostring(rank))
 end
 watcher.refreshBalance = function()
     pcall(function()
