@@ -2643,7 +2643,6 @@ local function startMissionFarm()
             -- Sau một lần refill, không teleport lại cho tới khi game replicate lưỡi mới.
             -- Đây là chặn loop: refillPending chỉ được xoá khi bladeStatus() đã khác 0/0.
             if (refillPending and refillCharacter == character) or (os.clock() - lastRefillAt < 3) then
-                if valid() then root.Anchored = true end
                 reportFarmWait("waiting for Reload replication")
                 task.wait(0.1)
                 return
@@ -2660,12 +2659,21 @@ local function startMissionFarm()
                 local function restore()
                     if restored or not root.Parent or player.Character ~= character then return end
                     restored = true
+                    clearRefillHold()
+                    root.Anchored = false
                     root.CFrame = returnCF
                     root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
                     root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-                    root.Anchored = valid()
+                    local hold = Instance.new("BodyPosition")
+                    hold.Name = "AutoPrestigeRefillHold"
+                    hold.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+                    hold.P = 100000
+                    hold.D = 2000
+                    hold.Position = returnCF.Position
+                    hold.Parent = root
+                    farm.refillHold = hold
                 end
-                print("[AUTO PRESTIGE] Blades empty -> teleport station -> wait 0.5s -> Reload -> return high.")
+                print("[AUTO PRESTIGE] Blades empty -> teleport station -> Reload -> wait 1s -> return high.")
                 local refillOK, refillError = pcall(function()
                     stopHeightGuard()
                     clearRefillHold()
@@ -2673,10 +2681,8 @@ local function startMissionFarm()
                     root.CFrame = station.CFrame + Vector3.new(0, 3, 0)
                     root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
                     root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-                    task.wait(0.5)
-                    if valid() then
-                        post:FireServer("Attacks", "Reload", station)
-                    end
+                    post:FireServer("Attacks", "Reload", station)
+                    task.wait(1)
                 end)
                 restore()
                 if not refillOK then
