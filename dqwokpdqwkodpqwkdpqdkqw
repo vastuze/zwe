@@ -2640,12 +2640,16 @@ local function startMissionFarm()
             release(); task.wait(0.1); return
         end
         if setsLeft == 0 and segmentsLeft == 0 then
-            -- Sau một lần refill, không teleport lại cho tới khi game replicate lưỡi mới.
-            -- Đây là chặn loop: refillPending chỉ được xoá khi bladeStatus() đã khác 0/0.
-            if (refillPending and refillCharacter == character) or (os.clock() - lastRefillAt < 3) then
-                reportFarmWait("waiting for Reload replication")
-                task.wait(0.1)
-                return
+            -- Sau một lần refill, chờ tối đa 2.5s để game replicate lưỡi/segments mới;
+            -- nếu đã có kiếm/segments thì thôi, còn vẫn 0/0 thì cho teleport refill lại.
+            if refillPending and refillCharacter == character then
+                if os.clock() - lastRefillAt < 2.5 then
+                    reportFarmWait("waiting for Reload replication")
+                    task.wait(0.1)
+                    return
+                end
+                refillPending = false
+                refillCharacter = nil
             end
             refillPending = true
             refillCharacter = character
@@ -2685,9 +2689,13 @@ local function startMissionFarm()
                     task.wait(1)
                 end)
                 restore()
+                local newSets, newSegments = bladeStatus(character)
+                if newSets and (newSets > 0 or (newSegments and newSegments > 0)) then
+                    refillPending = false
+                    refillCharacter = nil
+                end
                 if not refillOK then
-                    -- The teleport was already attempted; never repeat it for this empty cycle.
-                    refillWarning("Reload attempt failed; automatic teleport retry disabled: " .. tostring(refillError))
+                    refillWarning("Reload attempt failed; will retry if still empty: " .. tostring(refillError))
                 end
             else
                 refillPending = false
