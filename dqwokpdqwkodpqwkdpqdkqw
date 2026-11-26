@@ -2605,6 +2605,7 @@ local function startMissionFarm()
     end
     local lastRefillWarning = -10
     local refillCharacter, refillPending
+    local lastRefillAt = -10
     local function refillWarning(message)
         if os.clock() - lastRefillWarning >= 10 then
             lastRefillWarning = os.clock()
@@ -2641,13 +2642,14 @@ local function startMissionFarm()
         if setsLeft == 0 and segmentsLeft == 0 then
             -- Sau một lần refill, không teleport lại cho tới khi game replicate lưỡi mới.
             -- Đây là chặn loop: refillPending chỉ được xoá khi bladeStatus() đã khác 0/0.
-            if refillPending and refillCharacter == character then
+            if (refillPending and refillCharacter == character) or (os.clock() - lastRefillAt < 3) then
                 reportFarmWait("waiting for Reload replication")
                 task.wait(0.1)
                 return
             end
             refillPending = true
             refillCharacter = character
+            lastRefillAt = os.clock()
             local station, post = getRefillPart(), remote("POST")
             if station and post and post:IsA("RemoteEvent") and valid() then
                 local oldCF = root.CFrame
@@ -2660,7 +2662,7 @@ local function startMissionFarm()
                     root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
                     root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
                 end
-                print("[AUTO PRESTIGE] Blades empty -> one Reload teleport; waiting for replication.")
+                print("[AUTO PRESTIGE] Blades empty -> teleport station -> wait 0.2s -> Reload -> return.")
                 local refillOK, refillError = pcall(function()
                     stopHeightGuard()
                     clearRefillHold()
@@ -2668,8 +2670,10 @@ local function startMissionFarm()
                     root.CFrame = station.CFrame + Vector3.new(0, 3, 0)
                     root.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
                     root.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-                    post:FireServer("Attacks", "Reload", station)
-                    task.wait(0.1)
+                    task.wait(0.2)
+                    if valid() then
+                        post:FireServer("Attacks", "Reload", station)
+                    end
                 end)
                 restore()
                 if not refillOK then
